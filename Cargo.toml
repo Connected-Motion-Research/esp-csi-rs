@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Omar Hiari"]
 description = "ESP CSI Driver for Rust"
@@ -40,7 +40,9 @@ println = ["esp-backtrace/println"]
 esp32 = [
     "esp-backtrace/esp32",
     "esp-hal/esp32",
+    "esp-hal/rt",
     "esp-println/esp32",
+    "esp-bootloader-esp-idf/esp32",
     "esp-println/auto",
     "esp-println/critical-section",
     "esp-wifi/esp32",
@@ -52,8 +54,10 @@ esp32 = [
 ## Support for the ESP32-C2
 esp32c2 = [
     "esp-backtrace/esp32c2",
+    "esp-bootloader-esp-idf/esp32c2",
     "esp-backtrace/println",
     "esp-hal/esp32c2",
+    "esp-hal/rt",
     "esp-println/esp32c2",
     "esp-println/auto",
     "esp-println/critical-section",
@@ -66,8 +70,10 @@ esp32c2 = [
 ## Support for the ESP32-C3
 esp32c3 = [
     "esp-hal/esp32c3",
+    "esp-hal/rt",
     "esp-backtrace/esp32c3",
     "esp-wifi/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
     "esp-wifi/csi",
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32c3",
@@ -79,8 +85,10 @@ esp32c3 = [
 ## Support for the ESP32-C6 (WiFi 6)
 esp32c6 = [
     "esp-hal/esp32c6",
+    "esp-hal/rt",
     "esp-backtrace/esp32c6",
     "esp-wifi/esp32c6",
+    "esp-bootloader-esp-idf/esp32c6",
     "esp-wifi/csi",
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32c6",
@@ -92,8 +100,10 @@ esp32c6 = [
 ## Support for the ESP32-S3 (AIoT)
 esp32s3 = [
     "esp-hal/esp32s3",
+    "esp-hal/rt",
     "esp-backtrace/esp32s3",
     "esp-wifi/esp32s3",
+    "esp-bootloader-esp-idf/esp32s3",
     "esp-wifi/csi",
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32s3",
@@ -105,12 +115,12 @@ esp32s3 = [
 
 [dependencies]
 # Core dependencies
-esp-bootloader-esp-idf = "0.1.0"
-esp-backtrace = { version = "0.16.0", optional = false, features = [
+esp-bootloader-esp-idf = { version = "0.2.0", optional = false }
+esp-backtrace = { version = "0.17.0", optional = false, features = [
     "exception-handler",
     "panic-handler",
 ] }
-esp-hal = { version = "1.0.0-beta.1", default-features = false, optional = false, features = [
+esp-hal = { version = "=1.0.0-rc.0", default-features = false, optional = false, features = [
     "unstable",
 ] }
 esp-alloc = { version = "0.8.0", optional = false }
@@ -125,7 +135,7 @@ embassy-net = { version = "0.7.0", optional = false, features = [
     "raw",
     "dns",
 ] }
-esp-wifi = { version = "0.14.0", default-features = false, optional = false, features = [
+esp-wifi = { version = "0.15.0", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
     "esp-alloc",
@@ -151,7 +161,7 @@ embassy-time = { version = "0.4.0", optional = false, features = [
     "generic-queue-8",
 ] }
 embassy-sync = { version = "0.7.0", optional = false }
-esp-hal-embassy = { version = "0.8.0", default-features = false, optional = false, features = [
+esp-hal-embassy = { version = "0.9.0", default-features = false, optional = false, features = [
     "executors",
 ] }
 static_cell = { version = "2.1.0", optional = false, features = ["nightly"] }
@@ -160,7 +170,7 @@ edge-dhcp = { version = "0.6.0", optional = false }
 edge-nal = { version = "0.5.0", optional = false }
 edge-nal-embassy = { version = "0.6.0", optional = false }
 enumset = { version = "1.1.5", optional = false }
-esp-println = { version = "0.14.0", optional = false, default-features = false }
+esp-println = { version = "0.15.0", optional = false, default-features = false }
 document-features = "0.2.11"
 
 [profile.dev]

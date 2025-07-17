@@ -659,9 +659,9 @@ async fn connection(
                             captured_secs: 0,
                         };
 
-                        // Sniffer has no option but to print CSI data
-                        // Sniffer does not have an active connection to a router or AP
-                        print_csi(info, date_time.clone(), data_buffer, csi_data_len);
+                        if print_csi_en {
+                            print_csi(info, date_time.clone(), data_buffer, csi_data_len);
+                        }
                     })
                     .unwrap();
 
