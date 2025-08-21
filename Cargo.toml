@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Omar Hiari"]
 description = "ESP CSI Driver for Rust"
@@ -16,9 +16,9 @@ exclude = ["target/debug/*", "assets/*"]
 path = "src/lib/lib.rs"
 
 [features]
-#! ⚠️ At minimum you are required to choose only ONE of the device options. Also you should activate either the defmt or println feature for console printing.
+#! ⚠️ At minimum you are required to choose only ONE of the device options. For the most efficient (and fastest) logging, you should combine defmt with the jtag-serial features.
 
-default = ["no-std"]
+default = ["no-std", "println", "auto"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via defmt.
@@ -33,8 +33,10 @@ defmt = [
 ]
 ## Enable logging via `println!()` instead of defmt.
 println = ["esp-backtrace/println"]
-
-# jtag = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
+## Enable the JTAG serial interface for logging. Only supported by ESP32-C3, ESP32-C6, and ESP32-S3.
+jtag-serial = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
+## Automaically select the logging interface based on the target.
+auto = ["esp-println/auto"]
 
 ## Support for the ESP32
 esp32 = [
@@ -43,7 +45,7 @@ esp32 = [
     "esp-hal/rt",
     "esp-println/esp32",
     "esp-bootloader-esp-idf/esp32",
-    "esp-println/auto",
+    # "esp-println/auto",
     "esp-println/critical-section",
     "esp-wifi/esp32",
     "esp-wifi/csi",
@@ -59,7 +61,7 @@ esp32c2 = [
     "esp-hal/esp32c2",
     "esp-hal/rt",
     "esp-println/esp32c2",
-    "esp-println/auto",
+    # "esp-println/auto",
     "esp-println/critical-section",
     "esp-wifi/esp32c2",
     "esp-wifi/csi",
@@ -78,7 +80,7 @@ esp32c3 = [
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32c3",
     "esp-println/esp32c3",
-    "esp-println/jtag-serial",
+    # "esp-println/jtag-serial",
     "esp-println/critical-section",
 ]
 
@@ -93,7 +95,7 @@ esp32c6 = [
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32c6",
     "esp-println/esp32c6",
-    "esp-println/jtag-serial",
+    # "esp-println/jtag-serial",
     "esp-println/critical-section",
 ]
 
@@ -108,7 +110,7 @@ esp32s3 = [
     "esp-wifi/sniffer",
     "esp-hal-embassy/esp32s3",
     "esp-println/esp32s3",
-    "esp-println/jtag-serial",
+    # "esp-println/jtag-serial",
     "esp-println/critical-section",
 ]
 
