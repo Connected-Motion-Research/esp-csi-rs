@@ -71,13 +71,9 @@ async fn main(spawner: Spawner) {
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
     let mut rng = Rng::new(peripherals.RNG);
-    let radio_clk = peripherals.RADIO_CLK;
 
     // Initialize WiFi Controller
-    let init = &*mk_static!(
-        EspWifiController<'static>,
-        init(timer, rng, radio_clk,).unwrap()
-    );
+    let init = &*mk_static!(EspWifiController<'static>, init(timer, rng).unwrap());
 
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();

@@ -1,6 +1,6 @@
 use heapless::String;
 
-/// WiFi configuration
+/// WiFi Configuration
 #[derive(Debug, Clone)]
 pub struct WiFiConfig {
     /// Network SSID

@@ -61,14 +61,10 @@ async fn main(spawner: Spawner) {
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
     let mut rng = Rng::new(peripherals.RNG);
-    let radio_clk = peripherals.RADIO_CLK;
 
     println!("Controller Init");
     // Initialize WiFi Controller
-    let init = &*mk_static!(
-        EspWifiController<'static>,
-        init(timer, rng, radio_clk,).unwrap()
-    );
+    let init = &*mk_static!(EspWifiController<'static>, init(timer, rng,).unwrap());
 
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
@@ -85,8 +81,8 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPointStation (no NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "esp".try_into().unwrap(),
-            password: "12345678".try_into().unwrap(),
+            ssid: "SSID".try_into().unwrap(),
+            password: "PASSWORD".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
@@ -95,7 +91,7 @@ async fn main(spawner: Spawner) {
             traffic_type: TrafficType::UDP,
             traffic_interval_ms: 1000,
         },
-        true,
+        false,
         NetworkArchitechture::AccessPointStation,
         None,
         false,
@@ -107,27 +103,16 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     // Collect CSI for 5 seconds
-    // let reciever = csi_collector.start(Some(5));
+    let csi = csi_collector.start(Some(5));
     // To run indefinely, use the following line instead
-    let csi = csi_collector.start(None);
-
-    // Optionally spawn a task to process incoming CSI data
-    // collector returns a Subscriber type with a buffer of 612 bytes, Capacity of 4, 2 subscribers, and 1 publisher
-    spawner.spawn(csi_task(csi)).ok();
+    // let csi = csi_collector.start(None);
 
     loop {
+        let csi = csi_collector.get_csi_data().await;
+        // csi_collector.print_csi_w_metadata().await;
+        println!("CSI Data printed from Main:");
+        println!("{:?}", csi);
+        println!("");
         Timer::after(Duration::from_secs(1)).await
-    }
-}
-
-#[embassy_executor::task]
-async fn csi_task(
-    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 4, 2, 1>,
-) {
-    loop {
-        // Wait for CSI data to be received
-        let csi_data = csi_buffer.next_message().await;
-        // Print the CSI data
-        println!("CSI Data printed from Task: {:?}", csi_data);
     }
 }

@@ -29,7 +29,7 @@ With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JT
 `esp-csi-rs` reduces device to host transfer overhead further by supporting `defmt`. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
 
 ### ✅ Traffic Generation
-When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate either ICMP (simple ping) or UDP traffic. The crate also allows you to control the intervals at which traffic is generated. ICMP is lighter weight, however, does not carry any application data. UDP allows for the transfer of application data if needed. However, this is a feature not enabled yet. 
+When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate either ICMP (simple ping) or UDP traffic. The crate also allows you to control the intervals at which traffic is generated. The crate also supports external traffic triggers. The resulting CSI from an external trigger is sent back as a UDP packet on port 10987.
 
 ### ✅ NTP Timestamp
 In architechtres involving a connection to a commercial router with internet access,the ESP device synchronizes with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
@@ -69,16 +69,20 @@ esp-csi-rs = { version = "0.1.0", features = ["esp32c3", "println"] }
 ## Usage Example
 This is the simplest example of how this crate can be used. This example follows a sniffer architechture where only one ESP device is needed. This example sets up the ESP to sniff packets of the surrounding networks and print out CSI data to the console.
 
+For more details refer to the crate [documentation](https://docs.rs/esp_csi_rs).
+
 ```rust
 use esp_csi_rs::{CSICollector, WiFiMode};
 
 let mut collector = CSICollector::new_with_defaults();
 collector.set_op_mode(WiFiMode::Sniffer);
-collector.start(10).await;
+collector.start(None);
+loop {
+    collector.print_csi_w_metadata().await;
+}
 ```
 Everytime CSI data is captured, the resulting output looks like this:
 ```bash
-New CSI Data
 mac: D6:62:A7:DC:DF:7C
 rssi: -79
 rate: 9

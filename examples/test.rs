@@ -1,9 +1,4 @@
-//! Example of Configuring Sniffer Mode for CSI Collection
-//!
-//! This configuration allows the collection of CSI data by sniffing WiFi networks.
-//! Only one device is needed in this configuration. No SSID or Password need to be defined.
-//!
-//! This is also the default configuraion in `WiFiConfig`. Though Sniffer mode can also be explicitly defined.
+//! Test Code for Debug Purposes
 
 #![no_std]
 #![no_main]
@@ -12,7 +7,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
-    config::{CSIConfig, TrafficConfig, WiFiConfig},
+    config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
 use esp_hal::rng::Rng;
@@ -42,8 +37,9 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate some heap space
-    esp_alloc::heap_allocator!(size:72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
+    println!("Embassy Init");
     // Initialize Embassy
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     esp_hal_embassy::init(timg1.timer0);
@@ -54,8 +50,9 @@ async fn main(spawner: Spawner) {
     let timer = timer1.timer0;
     let mut rng = Rng::new(peripherals.RNG);
 
+    println!("Controller Init");
     // Initialize WiFi Controller
-    let init = &*mk_static!(EspWifiController<'static>, init(timer, rng).unwrap());
+    let init = &*mk_static!(EspWifiController<'static>, init(timer, rng,).unwrap());
 
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
@@ -66,17 +63,26 @@ async fn main(spawner: Spawner) {
     println!("WiFi Controller Initialized");
 
     // Create a CSI collector configuration
-    // Device configured to default as Sniffer
-    // Traffic generation, although default, is ignored
-    // Network Architechture is Sniffer
-    let csi_collector = CSICollector::new(
-        WiFiConfig::default(),
-        esp_csi_rs::WiFiMode::Sniffer,
+    // Device configured as a Station
+    // Traffic is enabled with UDP packets
+    // Traffic (UDP packets) is generated every 1000 milliseconds
+    // Network Architechture is AccessPointStation (no NTP time collection)
+    let mut csi_collector = CSICollector::new(
+        WiFiConfig {
+            ssid: "JetsonAP".try_into().unwrap(),
+            password: "jetson123".try_into().unwrap(),
+            ..Default::default()
+        },
+        esp_csi_rs::WiFiMode::Station,
         CSIConfig::default(),
-        TrafficConfig::default(),
+        TrafficConfig {
+            traffic_type: TrafficType::UDP,
+            traffic_interval_ms: 1000,
+        },
         false,
-        NetworkArchitechture::Sniffer,
-        None,
+        NetworkArchitechture::AccessPointStation,
+        // None,
+        Some([0x48, 0x8F, 0x4C, 0xFE, 0xD3, 0xEE]),
         true,
     );
 
@@ -85,10 +91,17 @@ async fn main(spawner: Spawner) {
         .init(controller, interfaces, seed, &spawner)
         .unwrap();
 
-    // Collect CSI for 100 seconds
-    csi_collector.start(Some(100));
+    // Collect CSI for 5 seconds
+    // let reciever = csi_collector.start(Some(5));
+    // To run indefinely, use the following line instead
+    csi_collector.start(None);
 
     loop {
+        let csi = csi_collector.get_csi_data().await;
+        // csi_collector.print_csi_w_metadata().await;
+        println!("CSI Data printed from Main:");
+        println!("{:?}", csi);
+        println!("");
         Timer::after(Duration::from_secs(1)).await
     }
 }
