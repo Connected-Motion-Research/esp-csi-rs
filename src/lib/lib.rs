@@ -265,7 +265,7 @@ struct DateTime {
 
 /// Device operation modes
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum WiFiMode {
+pub enum WiFiMode {
     /// Access Point mode
     AccessPoint,
     /// Station (client) mode
@@ -278,7 +278,7 @@ enum WiFiMode {
 
 /// Network Architechture Options
 #[derive(Debug, Clone, Copy)]
-enum NetworkArchitechture {
+pub enum NetworkArchitechture {
     /// Router Connected to One Station
     RouterStation,
     /// Router Connected to Access Point + Station Connected to One or More Station(s)
@@ -366,7 +366,7 @@ impl CSICollector {
     /// Everytime this method is called, the collection restarts with the current configuration/profile without the need to initialize again.
     /// `collection_time_secs` is an optional parameter to define the collection duration in seconds.
     /// If `None` is provided, the collection will continue indefinitely until the device is reset or powered off.
-    pub fn start(&self) {
+    pub fn start(&self, collection_time_secs: Option<u64>) {
         // In this method everytime the collection starts, the new configurations are loaded and propagated to global context.
         // All settings can be copied from new configuration and loaded to global, without needing to initalize again.
         // Initialization should be restriced to setting up hardware an spawning the network tasks.

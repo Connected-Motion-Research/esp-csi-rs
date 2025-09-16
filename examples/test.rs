@@ -69,8 +69,10 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPointStation (no NTP time collection)
     let mut csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "JetsonAP".try_into().unwrap(),
-            password: "jetson123".try_into().unwrap(),
+            // ssid: "JetsonAP".try_into().unwrap(),
+            // password: "jetson123".try_into().unwrap(),
+            ssid: "esp-wifi".try_into().unwrap(),
+            password: "12345678".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
@@ -81,8 +83,8 @@ async fn main(spawner: Spawner) {
         },
         false,
         NetworkArchitechture::AccessPointStation,
-        // None,
-        Some([0x48, 0x8F, 0x4C, 0xFE, 0xD3, 0xEE]),
+        None,
+        // Some([0x48, 0x8F, 0x4C, 0xFE, 0xD3, 0xEE]),
         true,
     );
 
