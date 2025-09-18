@@ -69,10 +69,10 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPointStation (no NTP time collection)
     let mut csi_collector = CSICollector::new(
         WiFiConfig {
-            // ssid: "JetsonAP".try_into().unwrap(),
-            // password: "jetson123".try_into().unwrap(),
-            ssid: "esp-wifi".try_into().unwrap(),
-            password: "12345678".try_into().unwrap(),
+            ssid: "JetsonAP".try_into().unwrap(),
+            password: "jetson123".try_into().unwrap(),
+            // ssid: "esp-wifi".try_into().unwrap(),
+            // password: "12345678".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
@@ -83,8 +83,8 @@ async fn main(spawner: Spawner) {
         },
         false,
         NetworkArchitechture::AccessPointStation,
-        None,
-        // Some([0x48, 0x8F, 0x4C, 0xFE, 0xD3, 0xEE]),
+        // None,
+        Some([0x48, 0x8F, 0x4C, 0xFE, 0xD3, 0xEE]),
         true,
     );
 
@@ -93,17 +93,16 @@ async fn main(spawner: Spawner) {
         .init(controller, interfaces, seed, &spawner)
         .unwrap();
 
-    // Collect CSI for 5 seconds
     // let reciever = csi_collector.start(Some(5));
     // To run indefinely, use the following line instead
     csi_collector.start(None);
 
     loop {
-        let csi = csi_collector.get_csi_data().await;
-        // csi_collector.print_csi_w_metadata().await;
-        println!("CSI Data printed from Main:");
-        println!("{:?}", csi);
-        println!("");
+        // let csi = csi_collector.get_csi_data().await;
+        // // csi_collector.print_csi_w_metadata().await;
+        // println!("CSI Data printed from Main:");
+        // println!("{:?}", csi);
+        // println!("");
         Timer::after(Duration::from_secs(1)).await
     }
 }

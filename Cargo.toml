@@ -170,6 +170,7 @@ enumset = { version = "1.1.5", optional = false }
 esp-println = { version = "0.15.0", optional = false, default-features = false }
 document-features = "0.2.11"
 ieee80211 = "0.5.9"
+tinyrand = "0.5.0"
 
 [profile.dev]
 # Rust debug is too slow.

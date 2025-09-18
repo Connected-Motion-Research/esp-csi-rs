@@ -174,6 +174,8 @@ pub use crate::csi::CSIDataPacket;
 use crate::error::{Error, Result};
 pub use crate::time::*;
 
+use tinyrand::{Rand, StdRand};
+
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -1340,10 +1342,15 @@ async fn process_csi_packet() {
             // println!("ICMP Sequence Number: {:?}", sequence_no);
             // println!("CSI Timestamp {:?}", csi_packet.timestamp);
 
-            // If timestamps match then update sequence number in CSI packet
-            if icmp_timestamp == csi_packet.timestamp {
+            // Calculate the absolute difference between the timestamps.
+            let timestamp_diff = icmp_timestamp.abs_diff(csi_packet.timestamp);
+
+            // If timestamps are within a tolerance window of 1000us, then update the sequence number.
+            if timestamp_diff <= 2000 {
                 csi_packet.sequence_number = sequence_no;
             } else {
+                // Print mistmatch (debiug)
+                // println!("Timestamp mismatch! Diff: {} us. CSI: {}, ICMP: {}", timestamp_diff, csi_packet.timestamp, icmp_timestamp);
                 csi_packet.sequence_number = 0;
             }
         }
