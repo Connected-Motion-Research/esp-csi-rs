@@ -782,7 +782,7 @@ async fn connection(mut controller: WifiController<'static>, mac_filter: Option<
                             }
                         }
 
-                        // Set CSI configuration only when collection is explicitly started
+                        // Set CSI Callback for Station or AP+Station modes
                         if !matches!(
                             wifi_mode,
                             WiFiMode::AccessPoint | WiFiMode::AccessPointStation
@@ -1346,7 +1346,7 @@ async fn process_csi_packet() {
             let timestamp_diff = icmp_timestamp.abs_diff(csi_packet.timestamp);
 
             // If timestamps are within a tolerance window of 1000us, then update the sequence number.
-            if timestamp_diff <= 2000 {
+            if timestamp_diff <= 3000 {
                 csi_packet.sequence_number = sequence_no;
             } else {
                 // Print mistmatch (debiug)
