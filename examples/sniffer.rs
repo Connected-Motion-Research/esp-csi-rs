@@ -9,12 +9,9 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::{
-    config::{CSIConfig, TrafficConfig, WiFiConfig},
-    CSICollector, NetworkArchitechture,
-};
+use esp_csi_rs::{collector::CSISniffer, config::CSIConfig};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
@@ -60,33 +57,60 @@ async fn main(spawner: Spawner) {
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
-    // Obtain a random seed value
-    let seed = rng.random() as u64;
-
     println!("WiFi Controller Initialized");
 
-    // Create a CSI collector configuration
-    // Device configured to default as Sniffer
-    // Traffic generation, although default, is ignored
-    // Network Architechture is Sniffer
-    let csi_collector = CSICollector::new(
-        WiFiConfig::default(),
-        esp_csi_rs::WiFiMode::Sniffer,
-        CSIConfig::default(),
-        TrafficConfig::default(),
-        false,
-        NetworkArchitechture::Sniffer,
-        None,
-        true,
-    );
+    // Create a Sniffer CSI Collector
+    // Don't filter any MAC addresses out
+    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None);
 
-    // Initalize CSI collector
-    csi_collector
-        .init(controller, interfaces, seed, &spawner)
+    // Initialize CSI Collector
+    csi_coll_snif
+        .init(controller, &interfaces, &spawner)
+        .await
         .unwrap();
 
-    // Collect CSI for 100 seconds
-    csi_collector.start(Some(100));
+    // Start Collection
+    csi_coll_snif.start();
+
+    // Collect for 5 Seconds
+    with_timeout(Duration::from_secs(2), async {
+        loop {
+            csi_coll_snif.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+
+    // Stop Collection
+    csi_coll_snif.stop();
+
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
+
+    // If configuration change is required controller has to be recaptured and reinitialized
+    // Otherwise just use the start method to restart
+    // let con = csi_coll_snif.recapture_controller().await;
+
+    // Initialize CSI Collector
+    // csi_coll_snif
+    //     .init(con, &interfaces, &spawner)
+    //     .await
+    //     .unwrap();
+
+    // Start Collection
+    csi_coll_snif.start();
+
+    // Collect for 2 Seconds
+    with_timeout(Duration::from_secs(2), async {
+        loop {
+            csi_coll_snif.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+
+    // Stop Collection
+    csi_coll_snif.stop();
 
     loop {
         Timer::after(Duration::from_secs(1)).await

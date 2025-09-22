@@ -164,6 +164,7 @@ use ieee80211::{data_frame::DataFrame, match_frames};
 
 use heapless::Vec;
 
+pub mod collector;
 pub mod config;
 mod csi;
 mod error;
@@ -173,8 +174,6 @@ use crate::config::*;
 pub use crate::csi::CSIDataPacket;
 use crate::error::{Error, Result};
 pub use crate::time::*;
-
-use tinyrand::{Rand, StdRand};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -191,6 +190,7 @@ const NTP_PORT: u16 = 123;
 
 static DATE_TIME: OnceLock<DateTimeCapture> = OnceLock::new();
 static START_COLLECTION: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
+static START_COLLECTION_: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static DATE_TIME_VALID: AtomicBool = AtomicBool::new(false);
 static LAST_SEQ_NUM: AtomicU16 = AtomicU16::new(0);
 static LAST_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
@@ -1233,7 +1233,7 @@ async fn sta_stack_task(
 }
 
 #[embassy_executor::task(pool_size = 2)]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     println!("Network Task Running");
     runner.run().await
 }
@@ -1283,7 +1283,7 @@ async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
 
 // Function to process the CSI info
 #[embassy_executor::task]
-async fn process_csi_packet() {
+pub async fn process_csi_packet() {
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
     let proc_csi_packet_sender = PROC_CSI_DATA.sender();
@@ -1346,7 +1346,7 @@ async fn process_csi_packet() {
             let timestamp_diff = icmp_timestamp.abs_diff(csi_packet.timestamp);
 
             // If timestamps are within a tolerance window of 1000us, then update the sequence number.
-            if timestamp_diff <= 3000 {
+            if timestamp_diff <= 4000 {
                 csi_packet.sequence_number = sequence_no;
             } else {
                 // Print mistmatch (debiug)
