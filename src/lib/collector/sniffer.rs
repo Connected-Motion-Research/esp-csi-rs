@@ -16,7 +16,9 @@ use crate::{build_csi_config, capture_csi_info, process_csi_packet};
 
 use crate::{CSIDataPacket, PROC_CSI_DATA, START_COLLECTION_};
 
-static CNTRLR_CHAN: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
+static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
+static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
+static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
 
 /// Driver Struct to Collect CSI as a Sniffer
 pub struct CSISniffer {
@@ -32,7 +34,7 @@ impl CSISniffer {
     /// Creates a new `CSISniffer` instance with a defined configuration/profile.
     pub fn new(csi_config: CSIConfig, mac_filter: Option<[u8; 6]>) -> Self {
         let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CNTRLR_CHAN.receiver();
+        let controller_rx = CONTROLLER_CH.receiver();
         Self {
             csi_config,
             mac_filter,
@@ -44,7 +46,7 @@ impl CSISniffer {
     /// Creates a new `CSISniffer` instance with defaults.
     pub fn new_with_defaults() -> Self {
         let proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CNTRLR_CHAN.receiver();
+        let controller_rx = CONTROLLER_CH.receiver();
         Self {
             csi_config: CSIConfig::default(),
             mac_filter: None,
@@ -54,38 +56,34 @@ impl CSISniffer {
     }
 
     /// Initialize WiFi and the CSI Collection System. This method starts the WiFi connection and spawns the required tasks.
-    pub async fn init(
-        &self,
-        controller: WifiController<'static>,
-        interface: &Interfaces<'static>,
-        spawner: &Spawner,
-    ) -> Result<()> {
+    pub async fn init(&self, interface: Interfaces<'static>, spawner: &Spawner) -> Result<()> {
         println!("Initializing Sniffer");
         // Create sniffer instance
         let sniffer = &interface.sniffer;
         sniffer.set_promiscuous_mode(true).unwrap();
-
-        // Share WiFi Controller to Global Context
-        // This is such that the controller can be returned if the Collection is deinitalized
-        CNTRLR_CHAN.send(controller).await;
-
         // Spawn the CSI processing task
         spawner.spawn(process_csi_packet()).ok();
         // Spawn controller
-        spawner
-            .spawn(sniffer_task(self.mac_filter, self.csi_config.clone()))
-            .ok();
+        spawner.spawn(sniffer_task()).ok();
         Ok(())
     }
 
     /// Starts CSI Collection
-    pub fn start(&self) {
+    pub async fn start(&self, mut controller: WifiController<'static>) {
+        // Send Updated Configs
+        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
+        MAC_FIL_CH.send(self.mac_filter).await;
+        // Share WiFi Controller to Global Context
+        // This is such that the controller can be returned if the Collection is deinitalized
+        CONTROLLER_CH.send(controller).await;
+        // Signal start collection
         START_COLLECTION_.signal(true);
     }
 
     /// Stops Collection
-    pub fn stop(&self) {
+    pub async fn stop(&self) -> WifiController<'static> {
         START_COLLECTION_.signal(false);
+        self.controller_rx.receive().await
     }
 
     /// Recaptures WiFi Controller Instance
@@ -111,24 +109,30 @@ impl CSISniffer {
 }
 
 #[embassy_executor::task]
-async fn sniffer_task(mac_filter: Option<[u8; 6]>, csi_config: CSIConfig) {
-    let mut controller = CNTRLR_CHAN.receive().await;
+async fn sniffer_task() {
     loop {
-        // Build CSI Configuration
-        let csi_cfg = build_csi_config(csi_config.clone());
         // Wait for Start Signal
         let start_collection = START_COLLECTION_.wait().await;
-        // If Start Collection is false then collection needs to stop
-        if !start_collection {
-            println!("Halting CSI Collection");
-            CNTRLR_CHAN.send(controller).await;
-            break;
+        let mut controller = CONTROLLER_CH.receive().await;
+        loop {
+            // Retrieved Updated Configuration
+            let mac_filter = MAC_FIL_CH.receive().await;
+            let csi_config = CSI_CONFIG_CH.receive().await;
+            // Build CSI Configuration
+            let csi_cfg = build_csi_config(csi_config.clone());
+            println!("Starting CSI Collection");
+            controller
+                .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                    capture_csi_info(info, mac_filter);
+                })
+                .unwrap();
+            // If Start Collection becomes false then collection needs to stop
+            let stop_collection = START_COLLECTION_.wait().await;
+            if !stop_collection {
+                println!("Halting CSI Collection");
+                CONTROLLER_CH.send(controller).await;
+                break;
+            }
         }
-        println!("Starting CSI Collection");
-        controller
-            .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                capture_csi_info(info, mac_filter);
-            })
-            .unwrap();
     }
 }

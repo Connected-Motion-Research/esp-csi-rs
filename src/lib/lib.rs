@@ -208,6 +208,7 @@ static PROC_CSI_DATA: Watch<CriticalSectionRawMutex, CSIDataPacket, 3> = Watch::
 static CSI_PACKET: PubSubChannel<CriticalSectionRawMutex, CSIDataPacket, 4, 1, 1> =
     PubSubChannel::new();
 static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static NET_TASK_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
@@ -1235,6 +1236,7 @@ async fn sta_stack_task(
 #[embassy_executor::task(pool_size = 2)]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     println!("Network Task Running");
+    NET_TASK_COMPLETE.signal(());
     runner.run().await
 }
 

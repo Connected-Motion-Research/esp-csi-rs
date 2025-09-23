@@ -64,41 +64,10 @@ async fn main(spawner: Spawner) {
     let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None);
 
     // Initialize CSI Collector
-    csi_coll_snif
-        .init(controller, &interfaces, &spawner)
-        .await
-        .unwrap();
+    csi_coll_snif.init(interfaces, &spawner).await.unwrap();
 
     // Start Collection
-    csi_coll_snif.start();
-
-    // Collect for 5 Seconds
-    with_timeout(Duration::from_secs(2), async {
-        loop {
-            csi_coll_snif.print_csi_w_metadata().await;
-        }
-    })
-    .await
-    .unwrap_err();
-
-    // Stop Collection
-    csi_coll_snif.stop();
-
-    println!("Starting Again in 3 seconds");
-    Timer::after(Duration::from_secs(3)).await;
-
-    // If configuration change is required controller has to be recaptured and reinitialized
-    // Otherwise just use the start method to restart
-    // let con = csi_coll_snif.recapture_controller().await;
-
-    // Initialize CSI Collector
-    // csi_coll_snif
-    //     .init(con, &interfaces, &spawner)
-    //     .await
-    //     .unwrap();
-
-    // Start Collection
-    csi_coll_snif.start();
+    csi_coll_snif.start(controller).await;
 
     // Collect for 2 Seconds
     with_timeout(Duration::from_secs(2), async {
@@ -110,7 +79,30 @@ async fn main(spawner: Spawner) {
     .unwrap_err();
 
     // Stop Collection
-    csi_coll_snif.stop();
+    // Also Recapture Controller to start another collection
+    let controller = csi_coll_snif.stop().await;
+
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
+
+    // Recapture Controller to start another collection
+    // let controller = csi_coll_snif.recapture_controller().await;
+
+    // Start Collection
+    csi_coll_snif.start(controller).await;
+
+    // Collect for 2 Seconds
+    with_timeout(Duration::from_secs(2), async {
+        loop {
+            csi_coll_snif.print_csi_w_metadata().await;
+        }
+    })
+    .await
+    .unwrap_err();
+
+    // Stop Collection
+    // No need to capture controller
+    let _ = csi_coll_snif.stop().await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await

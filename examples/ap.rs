@@ -24,6 +24,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
+    collector::CSIAccessPoint,
     config::{CSIConfig, TrafficConfig, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
@@ -31,7 +32,7 @@ use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
-use esp_wifi::{init, EspWifiController};
+use esp_wifi::{init, wifi::AccessPointConfiguration, EspWifiController};
 
 esp_app_desc!();
 
@@ -81,35 +82,47 @@ async fn main(spawner: Spawner) {
     // Device configured as a Access Point
     // Traffic is not enabled, so configuration is ignored. Connected stations are expected to generate traffic.
     // Network Architechture is AccessPoint-Station (NTP time collection not possible)
-    let csi_collector = CSICollector::new(
-        WiFiConfig {
-            ap_ssid: "esp".try_into().unwrap(),
-            ap_password: "12345678".try_into().unwrap(),
-            max_connections: 2,
-            ssid_hidden: false,
-            ..Default::default()
-        },
-        esp_csi_rs::WiFiMode::AccessPoint,
-        CSIConfig::default(),
-        TrafficConfig::default(),
-        false,
-        NetworkArchitechture::AccessPointStation,
-        None,
-        false,
-    );
+    let mut csi_coll_ap = CSIAccessPoint::new_with_defaults();
 
-    // Initalize CSI collector
-    csi_collector
-        .init(controller, interfaces, seed, &spawner)
-        .unwrap();
+    // Initalize CSI collector AP
+    csi_coll_ap.init(interfaces, &spawner).await.unwrap();
 
     // Start Collecting CSI data
     // In access point mode, defining a duration does not matter. This is because there isnt any collection happening.
     // The Access point only runs to support stations connecting to it.
-    csi_collector.start(None);
+    // Start Collection
+    csi_coll_ap.start(controller).await;
+    println!("Started AP First Time");
+
+    // Collect for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Stop Collection & Recapture Controller for Next Collection
+    let controller = csi_coll_ap.stop().await;
+    println!("Stopped AP");
+
+    // Ex. Update AP Configuration
+    println!("Updating Configuration");
+    csi_coll_ap.update_config(AccessPointConfiguration::default());
+
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
+
+    // Recapture Controller to start another collection
+    // let controller = csi_coll_ap.recapture_controller().await;
+
+    // Start Collection
+    csi_coll_ap.start(controller).await;
+    println!("Started AP Again");
+
+    // Collect for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Stop Collection
+    let _ = csi_coll_ap.stop().await;
+    println!("Stopped AP");
 
     loop {
-        // Yeild to other tasks
         Timer::after(Duration::from_secs(1)).await
     }
 }
