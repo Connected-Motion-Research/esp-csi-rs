@@ -1,134 +1,226 @@
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
-use embassy_sync::watch::Receiver;
+
+use embassy_time::{Duration, Timer};
+
+use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
+
+use core::{net::Ipv4Addr, str::FromStr};
 
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
-use esp_wifi::wifi::Interfaces;
 use esp_wifi::wifi::WifiController;
+use esp_wifi::wifi::{AccessPointConfiguration, ClientConfiguration, Configuration, Interfaces};
 
 use crate::error::Result;
 
-use crate::CSIConfig;
-use crate::{build_csi_config, capture_csi_info, process_csi_packet};
+use crate::collector::ap::{ap_connection, ApOperationMode};
+use crate::{net_task, run_dhcp_server, IpInfo};
 
-use crate::{CSIDataPacket, PROC_CSI_DATA, START_COLLECTION_};
+use crate::{DHCP_CLIENT_INFO, DHCP_COMPLETE, NET_TASK_COMPLETE, PROC_CSI_DATA, START_COLLECTION_};
 
-static CNTRLR_CHAN: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
 
-/// Driver Struct to Collect CSI as a Sniffer
-pub struct CSIAccesPointStation {
-    /// CSI Collection Parameters
-    pub csi_config: CSIConfig,
-    /// MAC Address Filter fo CSI Data
-    pub mac_filter: Option<[u8; 6]>,
-    csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
+static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
+
+/// Driver Struct to Collect CSI as a Access Point + Station
+pub struct CSIAccessPointStation {
+    /// Access Point Configuration
+    pub ap_config: AccessPointConfiguration,
+    /// Station/Client Configuration
+    pub sta_config: ClientConfiguration,
+    /// Operation Mode: Trigger or Monitor
+    pub op_mode: ApOperationMode,
     controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
-impl CSIAccesPointStation {
-    /// Creates a new `CSISniffer` instance with a defined configuration/profile.
-    pub fn new(csi_config: CSIConfig, mac_filter: Option<[u8; 6]>) -> Self {
-        let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CNTRLR_CHAN.receiver();
+impl CSIAccessPointStation {
+    /// Creates a new `CSIAccessPointStation` instance with a defined configuration/profile.
+    pub fn new(
+        ap_config: AccessPointConfiguration,
+        sta_config: ClientConfiguration,
+        op_mode: ApOperationMode,
+    ) -> Self {
+        let controller_rx = CONTROLLER_CH.receiver();
         Self {
-            csi_config,
-            mac_filter,
-            csi_data_rx,
+            ap_config,
+            sta_config,
+            op_mode,
             controller_rx,
         }
     }
 
     /// Creates a new `CSISniffer` instance with defaults.
     pub fn new_with_defaults() -> Self {
-        let proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CNTRLR_CHAN.receiver();
+        let _proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
+        let controller_rx = CONTROLLER_CH.receiver();
         Self {
-            csi_config: CSIConfig::default(),
-            mac_filter: None,
-            csi_data_rx: proc_csi_data_rx,
+            ap_config: AccessPointConfiguration::default(),
+            sta_config: ClientConfiguration::default(),
+            op_mode: ApOperationMode::Monitor,
             controller_rx: controller_rx,
         }
     }
 
-    /// Initialize WiFi and the CSI Collection System. This method starts the WiFi connection and spawns the required tasks.
-    pub async fn init(
-        &self,
-        controller: WifiController<'static>,
-        interface: &Interfaces<'static>,
-        spawner: &Spawner,
-    ) -> Result<()> {
-        println!("Initializing Sniffer");
-        // Create sniffer instance
-        let sniffer = &interface.sniffer;
-        sniffer.set_promiscuous_mode(true).unwrap();
+    /// Updates `CSIAccessPointStation` AP Configuration
+    pub fn update_ap_config(&mut self, ap_config: AccessPointConfiguration) {
+        self.ap_config = ap_config;
+    }
 
-        // Share WiFi Controller to Global Context
-        // This is such that the controller can be returned if the Collection is deinitalized
-        CNTRLR_CHAN.send(controller).await;
+    /// Updates `CSIAccessPointStation` STA Configuration
+    pub fn update_sta_config(&mut self, sta_config: ClientConfiguration) {
+        self.sta_config = sta_config;
+    }
 
-        // Spawn the CSI processing task
-        spawner.spawn(process_csi_packet()).ok();
-        // Spawn controller
+    /// Initialize WiFi and the CSI Collection System. This method spawns the connection, DHCP, and network tasks.
+    pub async fn init(&self, interface: Interfaces<'static>, spawner: &Spawner) -> Result<()> {
+        println!("Initializing Access Point");
+        // Create gateway IP address instance
+        // This config doesnt get an IP address from router but runs DHCP server
+        let gw_ip_addr_str = "192.168.2.1";
+        let gw_ip_addr = Ipv4Addr::from_str(gw_ip_addr_str).expect("failed to parse gateway ip");
+
+        // Access Point IP Configuration
+        let ap_ip_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+            address: Ipv4Cidr::new(gw_ip_addr, 24),
+            gateway: Some(gw_ip_addr),
+            dns_servers: Default::default(),
+        });
+
+        let seed = 123456_u64;
+        let ap_interface = interface.ap;
+
+        // Create AP Network Stack
+        let (ap_stack, ap_runner) = embassy_net::new(
+            ap_interface,
+            ap_ip_config,
+            mk_static!(StackResources<3>, StackResources::<3>::new()),
+            seed,
+        );
+
+        // Station IP Configuration - DHCP
+        let sta_ip_config = embassy_net::Config::dhcpv4(Default::default());
+        let sta_interface = interface.sta;
+
+        // Create STA Network Stack
+        let (sta_stack, sta_runner) = embassy_net::new(
+            sta_interface,
+            sta_ip_config,
+            mk_static!(StackResources<6>, StackResources::<6>::new()),
+            seed,
+        );
+
+        // Spawn the network runner tasks to run DHCP
+        spawner.spawn(net_task(ap_runner)).ok();
+        spawner.spawn(net_task(sta_runner)).ok();
+
+        // Run DHCP Client for STA to acquire IP
+        run_dhcp_client(sta_stack).await;
+
+        // Spawn the CSI processing task and AP Connection Management task
         spawner
-            .spawn(sniffer_task(self.mac_filter, self.csi_config.clone()))
+            .spawn(run_dhcp_server(ap_stack, gw_ip_addr_str))
             .ok();
+        spawner.spawn(ap_connection()).ok();
+
+        // Wait for Net Task to Complete
+        // NET_TASK_COMPLETE.wait().await;
+        // Wait for DHCP Server to Run before finishing init
+        DHCP_COMPLETE.wait().await;
+        // No need to wait on DHCP since its awaited in init above
+        // Initialization Finished
+        println!("Access Point Initialized");
+
         Ok(())
     }
 
-    /// Starts CSI Collection
-    pub fn start(&self) {
+    /// Starts the Access Point + Station & Loads Configuration
+    /// To reconfigure AP/STA settings, no need to reinit, only call start again with the updated configuration.
+    pub async fn start(&self, mut controller: WifiController<'static>) {
+        let config = Configuration::Mixed(self.sta_config.clone(), self.ap_config.clone());
+        match controller.set_configuration(&config) {
+            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+            Err(_) => {
+                println!("WiFi Configuration Error");
+                println!("Error Config: {:?}", config);
+            }
+        }
+
+        // In case controller isnt started already, start it
+        if !matches!(controller.is_started(), Ok(true)) {
+            controller.start_async().await.unwrap();
+            println!("Wifi started!");
+        }
+
+        // Signal Collection Start
         START_COLLECTION_.signal(true);
+        // Share WiFi Controller to Global Context
+        CONTROLLER_CH.send(controller).await;
     }
 
-    /// Stops Collection
-    pub fn stop(&self) {
+    /// Stops Collection & Returns WiFi Controller Instance
+    pub async fn stop(&self) -> WifiController<'static> {
         START_COLLECTION_.signal(false);
+        self.controller_rx.receive().await
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
         self.controller_rx.receive().await
     }
-
-    /// Retrieve the latest available CSI data packet
-    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        // Wait for CSI data packet to update
-        self.csi_data_rx.changed().await
-    }
-
-    /// Print the latest CSI data with metadata to console
-    /// Optionally pass current time instant to calculate DateTimeCapture if available
-    pub async fn print_csi_w_metadata(&mut self) {
-        // Wait for CSI data packet to update
-        let proc_csi_data = self.csi_data_rx.changed().await;
-
-        // Print the CSI data to console
-        proc_csi_data.print_csi_w_metadata();
-    }
 }
 
-#[embassy_executor::task]
-async fn sniffer_task(mac_filter: Option<[u8; 6]>, csi_config: CSIConfig) {
-    let mut controller = CNTRLR_CHAN.receive().await;
+// #[embassy_executor::task]
+pub async fn run_dhcp_client(sta_stack: Stack<'static>) {
+    println!("Running DHCP Client");
+
+    // Acquire and store IP information for gateway and client after configuration is up
+
+    // Check if link is up
+    sta_stack.wait_link_up().await;
+    println!("Link is up!");
+
+    // Create instance to store acquired IP information
+    let mut ip_info = IpInfo {
+        local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
+        gateway_address: Ipv4Address::UNSPECIFIED,
+    };
+
+    println!("Acquiring config...");
+    sta_stack.wait_config_up().await;
+    println!("Config Acquired");
+
+    // Print out acquired IP configuration
     loop {
-        // Build CSI Configuration
-        let csi_cfg = build_csi_config(csi_config.clone());
-        // Wait for Start Signal
-        let start_collection = START_COLLECTION_.wait().await;
-        // If Start Collection is false then collection needs to stop
-        if !start_collection {
-            println!("Halting CSI Collection");
-            CNTRLR_CHAN.send(controller).await;
+        if let Some(config) = sta_stack.config_v4() {
+            ip_info.local_address = config.address;
+            ip_info.gateway_address = config.gateway.unwrap();
+
+            #[cfg(feature = "defmt")]
+            {
+                info!("Local IP: {:?}", ip_info.local_address);
+                info!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            #[cfg(not(feature = "defmt"))]
+            {
+                println!("Local IP: {:?}", ip_info.local_address);
+                println!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
             break;
         }
-        println!("Starting CSI Collection");
-        controller
-            .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                capture_csi_info(info, mac_filter);
-            })
-            .unwrap();
+        Timer::after(Duration::from_millis(500)).await;
     }
+    // Signal that DHCP is complete
+    DHCP_CLIENT_INFO.signal(ip_info);
 }

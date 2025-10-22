@@ -32,6 +32,18 @@
 //! With the exception of sniffer mode, the collection of CSI requires at least two WiFI enabled devices; an Access Point and a Station. Both devices could be ESP devices one programmed as a Station and another as an Access Point. Alternatively, the simplest setup is using one ESP device as a Station connecting to an existing Access Point like a home router.
 //! This crate supports creating both Access Points and Stations and there are several examples to demonstrate in the repository. When both devices are ESPs, the Access Point and the Station are able to collect CSI data.
 //!
+//! ### Types of CSI Collection
+//! AP, AP/STA, STA, & Sniffer
+//!
+//!
+//!
+//! AP and AP/STA modes do not collect CSI locally, they are merely CSI collection enablers for stations. They rely on connected stations to capture CSI data.
+//! Explain trigger mode vs listener mode
+//!
+//! They can operate as external traffic trigger providers for connected stations. The CSI collected at the stations is then propagated back through a UDP message to the trigger source (AP or AP/STA).
+//! Alternatively, the  
+//!
+//!
 //! ### Traffic Generation
 //! To recieve CSI data, there needs to be regular traffic on the network. There are two options to generate traffic:
 //! - **Internal Trigger**: The `CSICollector` can be configured to generate dummy traffic at a desired rate. This traffic would trigger CSI data collection. The crate provides the option of using ICMP or UDP to generate traffic.
@@ -156,8 +168,8 @@ use enumset::enum_set;
 
 use core::{net::Ipv4Addr, str::FromStr};
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, blocking_mutex::Mutex, once_lock::OnceLock,
-    signal::Signal,
+    blocking_mutex::raw::CriticalSectionRawMutex, blocking_mutex::Mutex, channel::Channel,
+    once_lock::OnceLock, signal::Signal,
 };
 
 use ieee80211::{data_frame::DataFrame, match_frames};
@@ -208,7 +220,10 @@ static PROC_CSI_DATA: Watch<CriticalSectionRawMutex, CSIDataPacket, 3> = Watch::
 static CSI_PACKET: PubSubChannel<CriticalSectionRawMutex, CSIDataPacket, 4, 1, 1> =
     PubSubChannel::new();
 static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-static NET_TASK_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new();
+static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
+static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
+static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
@@ -256,7 +271,7 @@ struct DateTimeCapture {
 }
 
 #[derive(Debug, Clone)]
-struct DateTime {
+pub struct DateTime {
     year: u64,
     month: u64,
     day: u64,
@@ -553,7 +568,9 @@ impl CSICollector {
 
                 // Spawn controller, runner, and DHCP server tasks
                 spawner.spawn(net_task(ap_runner)).ok();
-                spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
+                spawner
+                    .spawn(run_dhcp_server(ap_stack, gw_ip_addr_str))
+                    .ok();
                 spawner.spawn(connection(controller, self.mac_filter)).ok();
                 // spawner.spawn(ap_stack_task(ap_stack)).ok();
             }
@@ -632,7 +649,9 @@ impl CSICollector {
                 spawner.spawn(connection(controller, self.mac_filter)).ok();
                 spawner.spawn(net_task(ap_runner)).ok();
                 spawner.spawn(net_task(sta_runner)).ok();
-                spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
+                spawner
+                    .spawn(run_dhcp_server(ap_stack, gw_ip_addr_str))
+                    .ok();
                 spawner
                     .spawn(sta_stack_task(
                         sta_stack,
@@ -1236,12 +1255,11 @@ async fn sta_stack_task(
 #[embassy_executor::task(pool_size = 2)]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     println!("Network Task Running");
-    NET_TASK_COMPLETE.signal(());
     runner.run().await
 }
 
 #[embassy_executor::task]
-async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
+async fn run_dhcp_server(stack: Stack<'static>, gw_ip_addr: &'static str) {
     use core::net::{Ipv4Addr, SocketAddrV4};
 
     use edge_dhcp::{

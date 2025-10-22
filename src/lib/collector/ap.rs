@@ -1,17 +1,12 @@
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
-use embassy_sync::watch::Receiver;
 
 use embassy_futures::select::{select, Either};
 
 use embassy_time::{Duration, Timer};
 
-use embassy_net::{
-    raw::{IpProtocol, IpVersion, PacketMetadata as RawPacketMetadata, RawSocket},
-    udp::{PacketMetadata, UdpSocket},
-    IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
-};
+use embassy_net::{Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 
 use core::{net::Ipv4Addr, str::FromStr};
 
@@ -19,16 +14,15 @@ use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
 use esp_wifi::wifi::{AccessPointConfiguration, Configuration, Interfaces};
-use esp_wifi::wifi::{WifiController, WifiEvent, WifiState};
+use esp_wifi::wifi::{WifiController, WifiEvent};
 
 use crate::error::Result;
 
 use enumset::enum_set;
 
-use crate::CSIConfig;
-use crate::{build_csi_config, capture_csi_info, net_task, process_csi_packet};
+use crate::net_task;
 
-use crate::{CSIDataPacket, DHCP_COMPLETE, NET_TASK_COMPLETE, PROC_CSI_DATA, START_COLLECTION_};
+use crate::{DHCP_COMPLETE, NET_TASK_COMPLETE, START_COLLECTION_};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -41,19 +35,66 @@ macro_rules! mk_static {
 
 static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
 
+/// Access Point Operation Modes
+/// Trigger: Sends trigger packets to stimulate CSI collection.
+/// Monitor: Monitors incoming trigger Packets to stimulate CSI collection at the trigger source.
+/// IMPORTANT NOTE: Trigger Mode not yet implemented
+pub enum ApOperationMode {
+    Trigger(ApTriggerConfig),
+    Monitor,
+}
+
+/// Configuration for Access Point Trigger Mode
+pub struct ApTriggerConfig {
+    /// Trigger Packet Frequency
+    trigger_freq_hz: u32,
+    /// Source Port #
+    src_port: u16,
+    /// Destination Port #
+    dest_port: u16,
+    /// Trigger Channel
+    channel: u8,
+    /// Trigger Type - Broadcast or Unicast
+    trigger_type: TriggerType,
+    /// Trigger Sequence Number Start
+    trigger_seq_num: u16,
+}
+
+impl Default for ApTriggerConfig {
+    fn default() -> Self {
+        Self {
+            trigger_freq_hz: 10,
+            src_port: 10789,
+            dest_port: 10789,
+            channel: 1,
+            trigger_type: TriggerType::Broadcast,
+            trigger_seq_num: 0,
+        }
+    }
+}
+
+enum TriggerType {
+    Broadcast,
+    /// Unicast Trigger Type requires a MAC Address
+    Unicast([u8; 6]),
+}
+
 /// Driver Struct to Enable CSI collection as an Access Point
 pub struct CSIAccessPoint {
     /// Access Point Configuration
     pub ap_config: AccessPointConfiguration,
+    /// Operation Mode: Trigger or Monitor
+    pub op_mode: ApOperationMode,
     controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSIAccessPoint {
     /// Creates a new `CSIAccessPoint` instance with a defined configuration/profile.
-    pub fn new(ap_config: AccessPointConfiguration) -> Self {
+    pub fn new(ap_config: AccessPointConfiguration, op_mode: ApOperationMode) -> Self {
         let controller_rx = CONTROLLER_CH.receiver();
         Self {
             ap_config,
+            op_mode,
             controller_rx,
         }
     }
@@ -63,6 +104,7 @@ impl CSIAccessPoint {
         let controller_rx = CONTROLLER_CH.receiver();
         Self {
             ap_config: AccessPointConfiguration::default(),
+            op_mode: ApOperationMode::Monitor,
             controller_rx: controller_rx,
         }
     }
@@ -101,11 +143,13 @@ impl CSIAccessPoint {
 
         // Spawn connection, runner, and DHCP server tasks
         spawner.spawn(net_task(ap_runner)).ok();
-        spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
+        spawner
+            .spawn(run_dhcp_server_server(ap_stack, gw_ip_addr_str))
+            .ok();
         spawner.spawn(ap_connection()).ok();
 
         // Wait for Net Task to Complete
-        NET_TASK_COMPLETE.wait().await;
+        // NET_TASK_COMPLETE.wait().await;
         // Wait for DHCP to complete
         DHCP_COMPLETE.wait().await;
         // Initialization Finished
@@ -116,9 +160,7 @@ impl CSIAccessPoint {
     /// Starts the Access Point & Loads Configuration
     /// To reconfigure AP settings, no need to reinit, only call start again with the updated configuration.
     pub async fn start(&self, mut controller: WifiController<'static>) {
-        START_COLLECTION_.signal(true);
         let config = Configuration::AccessPoint(self.ap_config.clone());
-
         match controller.set_configuration(&config) {
             Ok(_) => println!("WiFi Configuration Set: {:?}", config),
             Err(_) => {
@@ -135,11 +177,13 @@ impl CSIAccessPoint {
             println!("Wifi started!");
         }
 
+        // Signal Collection Start
+        START_COLLECTION_.signal(true);
         // Share WiFi Controller to Global Context
-        // This is such that the controller can be returned if the Collection is stopped
         CONTROLLER_CH.send(controller).await;
     }
 
+    /// Stops Collection & Returns WiFi Controller Instance
     pub async fn stop(&self) -> WifiController<'static> {
         START_COLLECTION_.signal(false);
         self.controller_rx.receive().await
@@ -152,7 +196,7 @@ impl CSIAccessPoint {
 }
 
 #[embassy_executor::task]
-async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
+async fn run_dhcp_server_server(stack: Stack<'static>, gw_ip_addr: &'static str) {
     use core::net::{Ipv4Addr, SocketAddrV4};
 
     use edge_dhcp::{
@@ -196,10 +240,13 @@ async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
 }
 
 #[embassy_executor::task]
-async fn ap_connection() {
+pub async fn ap_connection() {
+    // Capture Controller
     let controller_rx = CONTROLLER_CH.receiver();
+    // Define Events to Listen For
     let ap_events =
         enum_set!(WifiEvent::ApStaconnected | WifiEvent::ApStadisconnected | WifiEvent::ApStop);
+    // Connection Loop
     loop {
         // Wait for collection signal to start
         while !START_COLLECTION_.wait().await {
@@ -208,10 +255,14 @@ async fn ap_connection() {
         let mut controller = controller_rx.receive().await;
         // println!("AP Connection task active.");
         loop {
+            // Events Future
             let wait_event_fut = controller.wait_for_events(ap_events, true);
+            // Stop Collection Future
             let stop_coll_fut = START_COLLECTION_.wait();
 
+            // If either future completes, handle accordingly
             match select(wait_event_fut, stop_coll_fut).await {
+                // Wait event future cases
                 Either::First(mut event) => {
                     if event.contains(WifiEvent::ApStaconnected) {
                         println!("New STA Connected");
@@ -221,11 +272,13 @@ async fn ap_connection() {
                     }
                     event.clear();
                 }
-                Either::Second(sig) => {
+                // Stop collection future case
+                // Return Controller and break inner loop
+                Either::Second(_sig) => {
                     // println!("AP Connection task stopping...");
                     // Send the controller back before we exit the inner loop
                     CONTROLLER_CH.send(controller).await;
-                    break; // Break inner loop, will wait for a new controller
+                    break; // Break inner loop, and go wait again for start and new controller
                 }
             }
         }

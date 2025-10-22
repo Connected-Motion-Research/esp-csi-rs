@@ -23,11 +23,7 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::{
-    collector::CSIAccessPoint,
-    config::{CSIConfig, TrafficConfig, WiFiConfig},
-    CSICollector, NetworkArchitechture,
-};
+use esp_csi_rs::collector::CSIAccessPoint;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
@@ -65,16 +61,13 @@ async fn main(spawner: Spawner) {
     let timer1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
-    let mut rng = Rng::new(peripherals.RNG);
+    let rng = Rng::new(peripherals.RNG);
 
     // Initialize WiFi Controller
     let init = &*mk_static!(EspWifiController<'static>, init(timer, rng).unwrap());
 
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
-
-    // Obtain a random seed value
-    let seed = rng.random() as u64;
 
     println!("WiFi Controller Initialized");
 

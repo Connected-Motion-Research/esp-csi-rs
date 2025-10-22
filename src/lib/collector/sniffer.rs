@@ -1,6 +1,6 @@
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
+use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::watch::Receiver;
 
 use esp_alloc as _;
@@ -14,17 +14,15 @@ use crate::error::Result;
 use crate::CSIConfig;
 use crate::{build_csi_config, capture_csi_info, process_csi_packet};
 
-use crate::{CSIDataPacket, PROC_CSI_DATA, START_COLLECTION_};
-
-static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
-static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
-static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
+use crate::{
+    CSIDataPacket, CONTROLLER_CH, CSI_CONFIG_CH, MAC_FIL_CH, PROC_CSI_DATA, START_COLLECTION_,
+};
 
 /// Driver Struct to Collect CSI as a Sniffer
 pub struct CSISniffer {
     /// CSI Collection Parameters
     pub csi_config: CSIConfig,
-    /// MAC Address Filter fo CSI Data
+    /// MAC Address Filter for CSI Data
     pub mac_filter: Option<[u8; 6]>,
     csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
     controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
@@ -69,7 +67,7 @@ impl CSISniffer {
     }
 
     /// Starts CSI Collection
-    pub async fn start(&self, mut controller: WifiController<'static>) {
+    pub async fn start(&self, controller: WifiController<'static>) {
         // Send Updated Configs
         CSI_CONFIG_CH.send(self.csi_config.clone()).await;
         MAC_FIL_CH.send(self.mac_filter).await;
@@ -112,7 +110,7 @@ impl CSISniffer {
 async fn sniffer_task() {
     loop {
         // Wait for Start Signal
-        let start_collection = START_COLLECTION_.wait().await;
+        START_COLLECTION_.wait().await;
         let mut controller = CONTROLLER_CH.receive().await;
         loop {
             // Retrieved Updated Configuration

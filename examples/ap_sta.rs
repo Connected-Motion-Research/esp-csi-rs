@@ -28,16 +28,14 @@
 #![no_main]
 
 use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::{
-    config::{CSIConfig, TrafficConfig, WiFiConfig},
-    CSICollector, NetworkArchitechture,
-};
+use esp_csi_rs::collector::CSIAccessPointStation;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
-use esp_wifi::{init, EspWifiController};
+use esp_wifi::{init, wifi::AccessPointConfiguration, EspWifiController};
 
 esp_app_desc!();
 
@@ -60,7 +58,7 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate some heap space
-    esp_alloc::heap_allocator!(size:72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     // Initialize Embassy
     let timg1 = TimerGroup::new(peripherals.TIMG1);
@@ -78,42 +76,53 @@ async fn main(spawner: Spawner) {
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
-    // Obtain a random seed value
-    let seed = rng.random() as u64;
-
     println!("WiFi Controller Initialized");
 
     // Create a CSI collector configuration
-    // Device configured as a Access Point + Router
+    // Device configured as a Access Point
     // Traffic is not enabled, so configuration is ignored. Connected stations are expected to generate traffic.
-    // Any traffic generated in this device mode would be between the AP and the Router
-    // Network Architechture is AccessPoint-Station (NTP time is collected)
-    let csi_collector = CSICollector::new(
-        WiFiConfig {
-            ap_ssid: "SSID".try_into().unwrap(),
-            ap_password: "PASSWORD".try_into().unwrap(),
-            ssid: "ROUTER_SSID".try_into().unwrap(),
-            password: "ROUTER_PASSWORD".try_into().unwrap(),
-            max_connections: 1,
-            ssid_hidden: false,
-            ..Default::default()
-        },
-        esp_csi_rs::WiFiMode::AccessPointStation,
-        CSIConfig::default(),
-        TrafficConfig::default(),
-        false,
-        NetworkArchitechture::RouterAccessPointStation,
-        None,
-        false,
-    );
+    // Network Architechture is AccessPoint-Station (NTP time collection not possible)
+    let mut csi_coll_ap = CSIAccessPointStation::new_with_defaults();
 
-    // Initalize CSI collector
-    csi_collector
-        .init(controller, interfaces, seed, &spawner)
-        .unwrap();
+    // Initalize CSI collector AP
+    csi_coll_ap.init(interfaces, &spawner).await.unwrap();
 
-    // Collect CSI for 10 seconds
-    csi_collector.start(Some(10));
+    // Start Collecting CSI data
+    // In access point mode, defining a duration does not matter. This is because there isnt any collection happening.
+    // The Access point only runs to support stations connecting to it.
+    // Start Collection
+    csi_coll_ap.start(controller).await;
+    println!("Started AP First Time");
 
-    loop {}
+    // Collect for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Stop Collection & Recapture Controller for Next Collection
+    let controller = csi_coll_ap.stop().await;
+    println!("Stopped AP");
+
+    // Ex. Update AP Configuration
+    println!("Updating Configuration");
+    csi_coll_ap.update_ap_config(AccessPointConfiguration::default());
+
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
+
+    // Recapture Controller to start another collection
+    // let controller = csi_coll_ap.recapture_controller().await;
+
+    // Start Collection
+    csi_coll_ap.start(controller).await;
+    println!("Started AP Again");
+
+    // Collect for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Stop Collection
+    let _ = csi_coll_ap.stop().await;
+    println!("Stopped AP");
+
+    loop {
+        Timer::after(Duration::from_secs(1)).await
+    }
 }
