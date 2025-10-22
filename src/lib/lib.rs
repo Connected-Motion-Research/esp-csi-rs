@@ -224,6 +224,7 @@ static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new()
 static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
 static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
 static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
+static CSI_UDP_RAW_CH: Channel<CriticalSectionRawMutex, Vec<u8, 619>, 2> = Channel::new();
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.

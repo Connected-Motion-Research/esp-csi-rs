@@ -19,7 +19,7 @@ use crate::error::Result;
 use crate::collector::ap::{ap_connection, ApOperationMode};
 use crate::{net_task, run_dhcp_server, IpInfo};
 
-use crate::{DHCP_CLIENT_INFO, DHCP_COMPLETE, NET_TASK_COMPLETE, PROC_CSI_DATA, START_COLLECTION_};
+use crate::{DHCP_CLIENT_INFO, DHCP_COMPLETE, PROC_CSI_DATA, START_COLLECTION_};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{

@@ -6,6 +6,8 @@ use embassy_sync::watch::Receiver;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
+use embassy_futures::select::{select, Either};
+
 use embassy_net::{
     raw::{IpProtocol, IpVersion, PacketMetadata as RawPacketMetadata, RawSocket},
     udp::{PacketMetadata, UdpSocket},
@@ -14,11 +16,13 @@ use embassy_net::{
 
 use embassy_time::{Duration, Instant, Timer};
 
+use enumset::enum_set;
+
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
 use esp_wifi::wifi::WifiController;
-use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice};
+use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice, WifiEvent};
 
 use crate::collector::run_dhcp_client;
 use crate::error::Result;
@@ -188,8 +192,6 @@ impl CSIStation {
             _ => {}
         }
 
-        // Make sure network task is running
-        // NET_TASK_COMPLETE.wait().await;
         // No need to wait on DHCP and NTP as they are awaited in init above
         println!("Access Point Initialized");
 
@@ -257,9 +259,18 @@ impl CSIStation {
     }
 
     /// Retrieve the latest available CSI data packet
-    pub async fn get_csi_data(&mut self) -> CSIDataPacket {
-        // Wait for CSI data packet to update
-        self.csi_data_rx.changed().await
+    /// This method does not work if the Station is in Monitor Mode
+    pub async fn get_csi_data(&mut self) -> Result<CSIDataPacket> {
+        match self.op_mode {
+            StaOperationMode::Monitor(_) => Err(crate::error::Error::SystemError(
+                "get_csi_data() not supported in Monitor Mode",
+            )),
+            _ => {
+                // Wait for CSI data packet to update
+                let csi_data_pkt = self.csi_data_rx.changed().await;
+                Ok(csi_data_pkt)
+            }
+        }
     }
 
     /// Print the latest CSI data with metadata to console
@@ -277,7 +288,7 @@ impl CSIStation {
 #[embassy_executor::task]
 pub async fn sta_connection() {
     // Acquire Controller
-    let mut controller_rx = CONTROLLER_CH.receiver();
+    let controller_rx = CONTROLLER_CH.receiver();
     // Define Events to Listen for
     let sta_events =
         enum_set!(WifiEvent::StaDisconnected | WifiEvent::StaStop | WifiEvent::StaConnected);
@@ -290,6 +301,8 @@ pub async fn sta_connection() {
         // Retrieved Updated Configuration
         let mac_filter = MAC_FIL_CH.receive().await;
         let csi_config = CSI_CONFIG_CH.receive().await;
+        // Retrieve Controller
+        let mut controller = controller_rx.receive().await;
         // Build CSI Configuration
         let csi_cfg = build_csi_config(csi_config.clone());
         println!("Starting CSI Collection");
@@ -298,10 +311,10 @@ pub async fn sta_connection() {
                 capture_csi_info(info, mac_filter);
             })
             .unwrap();
-        let mut controller = controller_rx.receive().await;
+
         loop {
             // Events Future
-            let wait_event_fut = controller.wait_for_events(ap_events, true);
+            let wait_event_fut = controller.wait_for_events(sta_events, true);
             // Stop Collection Future
             let stop_coll_fut = START_COLLECTION_.wait();
 
@@ -309,11 +322,11 @@ pub async fn sta_connection() {
             match select(wait_event_fut, stop_coll_fut).await {
                 // Wait event future cases
                 Either::First(mut event) => {
-                    if event.contains(WifiEvent::ApStaconnected) {
-                        println!("New STA Connected");
-                    }
-                    if event.contains(WifiEvent::ApStadisconnected) {
+                    if event.contains(WifiEvent::StaDisconnected) {
                         println!("STA Disconnected");
+                    }
+                    if event.contains(WifiEvent::StaStop) {
+                        println!("STA Stopped");
                     }
                     event.clear();
                 }
@@ -436,20 +449,23 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
 
             let mut proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
 
+            // Create a message buffer for the data to be sent back
+
+            // Message format w/ seq_no:
+            // [0..1]   : 2 bytes seq_no (u16) - big endian
+            // [2]      : 1 byte for CSI data format (mapping below)
+            // [2..7]   : 4 bytes timestamp (u32) - big endian
+            // [7..n]   : n-6 bytes CSI data (i8)
+
+            // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
+            let mut message_u8: Vec<u8, 619> = Vec::new();
+
             loop {
+                // Clear the buffer for new message
+                message_u8.clear();
+
                 // Wait for CSI data packet to update
                 let proc_csi_data = proc_csi_data_rx.changed().await;
-
-                // Create a message buffer for the data to be sent back
-
-                // Message format w/ seq_no:
-                // [0..1]   : 2 bytes seq_no (u16) - big endian
-                // [2]      : 1 byte for CSI data format (mapping below)
-                // [2..7]   : 4 bytes timestamp (u32) - big endian
-                // [7..n]   : n-6 bytes CSI data (i8)
-
-                // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
-                let mut message_u8: Vec<u8, 619> = Vec::new();
 
                 // CSI is captured in a callback that does not have access to the ICMP sequence number
                 // The CSI callback, however, does have access to the timestamp of the packet
