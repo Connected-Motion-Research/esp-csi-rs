@@ -225,6 +225,9 @@ static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 
 static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
 static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
 static CSI_UDP_RAW_CH: Channel<CriticalSectionRawMutex, Vec<u8, 619>, 2> = Channel::new();
+static CLIENT_CONFIG_CH: Channel<CriticalSectionRawMutex, ClientConfiguration, 1> = Channel::new();
+static ACCESSPOINT_CONFIG_CH: Channel<CriticalSectionRawMutex, AccessPointConfiguration, 1> =
+    Channel::new();
 
 /// A mapping of the different possible recieved CSI data formats supported by the Espressif WiFi driver.
 /// `RxCSIFmt`` encodes the different formats (each column in the table) in one byte to save space when transmitting back CSI data.
@@ -263,6 +266,13 @@ pub enum RxCSIFmt {
     Undefined,
 }
 
+#[derive(Debug, Clone)]
+enum ConnectionType {
+    Client,
+    AccessPoint,
+    Mixed,
+}
+
 // Date Time Struct
 #[derive(Debug, Clone)]
 struct DateTimeCapture {
@@ -282,6 +292,7 @@ pub struct DateTime {
     millisecond: u64,
 }
 
+// REMOVE THIS CONFIG STRUCT
 /// Device operation modes
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WiFiMode {
@@ -295,6 +306,7 @@ pub enum WiFiMode {
     Sniffer,
 }
 
+// REMOVE THIS CONFIG STRUCT
 /// Network Architechture Options
 #[derive(Debug, Clone, Copy)]
 pub enum NetworkArchitechture {
@@ -314,6 +326,8 @@ struct IpInfo {
     pub gateway_address: Ipv4Address,
 }
 
+// REMOVE THIS DRIVER STRUCT
+// NO LONGER NEEDED
 /// Main Driver Struct for CSI Collection
 pub struct CSICollector {
     /// WiFi Configuration
@@ -743,6 +757,8 @@ async fn sequence_sync_task(mut sniffer: Sniffer) {
     });
 }
 
+// TASK NO LONGER NEEDED
+// TASK NOT USED ANYMORE
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>, mac_filter: Option<[u8; 6]>) {
     loop {
@@ -987,6 +1003,8 @@ async fn connection(mut controller: WifiController<'static>, mac_filter: Option<
 //     }
 // }
 
+// TASK NOT USED
+// NO LONGER NEEDED
 #[embassy_executor::task]
 async fn sta_stack_task(
     sta_stack: Stack<'static>,
@@ -1255,7 +1273,7 @@ async fn sta_stack_task(
 
 #[embassy_executor::task(pool_size = 2)]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    println!("Network Task Running");
+    // println!("Network Task Running");
     runner.run().await
 }
 
@@ -1593,4 +1611,191 @@ fn build_csi_config(csi_config: CSIConfig) -> CsiConfig {
         shift: csi_config.shift,
         dump_ack_en: csi_config.dump_ack_en,
     }
+}
+
+async fn configure_connection(conn_type: ConnectionType) {
+    // Capture Controller & Configuration from Global Context
+    let mut controller = CONTROLLER_CH.receive().await;
+    match conn_type {
+        ConnectionType::AccessPoint => {
+            let ap_config = ACCESSPOINT_CONFIG_CH.receive().await;
+            let config = Configuration::AccessPoint(ap_config.clone());
+            // Set the Configuration
+            match controller.set_configuration(&config) {
+                Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+                Err(_) => {
+                    println!("WiFi Configuration Error");
+                    println!("Error Config: {:?}", config);
+                }
+            }
+            ACCESSPOINT_CONFIG_CH.send(ap_config).await;
+        }
+        ConnectionType::Client => {
+            let sta_config = CLIENT_CONFIG_CH.receive().await;
+            let config = Configuration::Client(sta_config.clone());
+            // Set the Configuration
+            match controller.set_configuration(&config) {
+                Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+                Err(_) => {
+                    println!("WiFi Configuration Error");
+                    println!("Error Config: {:?}", config);
+                }
+            }
+            CLIENT_CONFIG_CH.send(sta_config).await;
+        }
+        ConnectionType::Mixed => {
+            let ap_config = ACCESSPOINT_CONFIG_CH.receive().await;
+            let sta_config = CLIENT_CONFIG_CH.receive().await;
+            let config = Configuration::Mixed(sta_config.clone(), ap_config.clone());
+            // Set the Configuration
+            match controller.set_configuration(&config) {
+                Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+                Err(_) => {
+                    println!("WiFi Configuration Error");
+                    println!("Error Config: {:?}", config);
+                }
+            }
+            CLIENT_CONFIG_CH.send(sta_config).await;
+            ACCESSPOINT_CONFIG_CH.send(ap_config).await;
+        }
+    };
+
+    // Return Controller & Configuration to Global Context
+    CONTROLLER_CH.send(controller).await;
+}
+
+async fn start_wifi() {
+    // Capture Controller & Configuration from Global Context
+    let mut controller = CONTROLLER_CH.receive().await;
+
+    match controller.start_async().await {
+        Ok(_) => println!("WiFi Started"),
+        Err(e) => {
+            panic!("Failed to start WiFi: {:?}", e);
+        }
+    }
+    // println!("Wifi started!");
+
+    // Return Controller & Configuration to Global Context
+    CONTROLLER_CH.send(controller).await;
+}
+
+async fn connect_wifi() {
+    // Capture Controller & Configuration from Global Context
+    let mut controller = CONTROLLER_CH.receive().await;
+
+    match controller.connect_async().await {
+        Ok(_) => println!("WiFi Connected"),
+        Err(e) => {
+            panic!("Failed to connect WiFi: {:?}", e);
+        }
+    }
+
+    // Return Controller & Configuration to Global Context
+    CONTROLLER_CH.send(controller).await;
+}
+
+async fn run_ntp_sync(sta_stack: Stack<'static>) {
+    println!("Running NTP Sync");
+    // Get Current SNTP unix time values
+    match get_sntp_time(sta_stack).await {
+        Ok((seconds, milliseconds)) => {
+            // Convert captured time to date/time values
+            let time_capture = unix_to_date_time(seconds.into(), milliseconds);
+
+            // Print the time captured for validation
+            println!(
+                "Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                time_capture.0,
+                time_capture.1,
+                time_capture.2,
+                time_capture.3,
+                time_capture.4,
+                time_capture.5,
+                time_capture.6
+            );
+
+            // Store the captured time instant values to DateTimeCapture struct
+            let time = DateTimeCapture {
+                captured_at: Instant::now(),
+                captured_secs: seconds as u64,
+                captured_millis: milliseconds,
+            };
+
+            // Move DateTimeCapture struct to Global Context
+            match DATE_TIME.init(time) {
+                Ok(_) => {
+                    println!("Time Captured");
+                    DATE_TIME_VALID.store(true, core::sync::atomic::Ordering::Relaxed);
+                }
+                Err(_) => {
+                    println!("Failed to Capture Time");
+                    DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        Err(_) => {
+            println!("Failed to get SNTP time, Proceeding with default.");
+            DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    // Signal that NTP Sync is complete
+    // NTP_SYNC_COMPLETE.signal(());
+}
+
+// Public Functions for user to interact with the library
+
+/// Updates Client Configuration
+pub async fn update_client_config(sta_config: ClientConfiguration) {
+    CLIENT_CONFIG_CH.send(sta_config).await;
+}
+
+/// Updates Access Point Configuration
+pub async fn update_ap_config(ap_config: AccessPointConfiguration) {
+    ACCESSPOINT_CONFIG_CH.send(ap_config).await;
+}
+
+/// Updates CSI Configuration
+pub async fn update_csi_config(csi_config: CSIConfig) {
+    CSI_CONFIG_CH.send(csi_config).await;
+}
+
+/// Stops Collection
+fn stop_collection() {
+    START_COLLECTION_.signal(false);
+}
+
+/// Recaptures WiFi Controller Instance
+async fn recapture_controller() -> WifiController<'static> {
+    CONTROLLER_CH.receive().await
+}
+/// Starts CSI Collection
+async fn start_collection(conn_type: ConnectionType) {
+    // Configure Client Connection
+    configure_connection(conn_type.clone()).await;
+
+    // In case controller isnt started already, start it
+    let mut controller = CONTROLLER_CH.receive().await;
+    if !matches!(controller.is_started(), Ok(true)) {
+        start_wifi().await;
+    }
+    CONTROLLER_CH.send(controller).await;
+
+    // In case controller isnt connected, establish a connection
+    let mut controller = CONTROLLER_CH.receive().await;
+    if !matches!(controller.is_connected(), Ok(true)) {
+        match conn_type {
+            ConnectionType::AccessPoint => {
+                // No need to connect if only AP mode
+            }
+            ConnectionType::Client | ConnectionType::Mixed => {
+                // Connect WiFi
+                connect_wifi().await;
+            }
+        }
+    }
+    CONTROLLER_CH.send(controller).await;
+
+    // Signal Collection Start
+    START_COLLECTION_.signal(true);
 }

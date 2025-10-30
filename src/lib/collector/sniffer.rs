@@ -96,7 +96,6 @@ impl CSISniffer {
     }
 
     /// Print the latest CSI data with metadata to console
-    /// Optionally pass current time instant to calculate DateTimeCapture if available
     pub async fn print_csi_w_metadata(&mut self) {
         // Wait for CSI data packet to update
         let proc_csi_data = self.csi_data_rx.changed().await;

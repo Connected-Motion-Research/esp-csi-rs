@@ -13,7 +13,7 @@ use embassy_time::{Duration, Timer};
 use embassy_net::{
     raw::{IpProtocol, IpVersion, PacketMetadata as RawPacketMetadata, RawSocket},
     udp::{PacketMetadata, UdpSocket},
-    IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
+    Ipv4Cidr, Stack, StackResources, StaticConfigV4,
 };
 
 use core::{net::Ipv4Addr, str::FromStr};
@@ -28,9 +28,14 @@ use crate::error::Result;
 
 use enumset::enum_set;
 
-use crate::net_task;
+use crate::{
+    configure_connection, connect_wifi, net_task, recapture_controller, start_collection,
+    start_wifi, stop_collection, ConnectionType, ACCESSPOINT_CONFIG_CH,
+};
 
-use crate::{CSIDataPacket, CSI_UDP_RAW_CH, DHCP_COMPLETE, START_COLLECTION_};
+use crate::{
+    CSIDataPacket, RxCSIFmt, CONTROLLER_CH, CSI_UDP_RAW_CH, DHCP_COMPLETE, START_COLLECTION_,
+};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -41,12 +46,9 @@ macro_rules! mk_static {
     }};
 }
 
-static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
-
 /// Access Point Operation Modes
-/// Trigger: Sends trigger packets to stimulate CSI collection.
-/// Monitor: Monitors incoming trigger Packets to stimulate CSI collection at the trigger source.
-/// IMPORTANT NOTE: Trigger Mode not yet implemented
+/// Trigger: Sends trigger packets to recieve CSI encapsulated in UDP packets from station.
+/// Monitor: Monitors incoming trigger packets to facilitate CSI collection at the trigger source (station).
 #[derive(PartialEq, Copy, Clone)]
 pub enum ApOperationMode {
     Trigger(ApTriggerConfig),
@@ -58,10 +60,8 @@ pub enum ApOperationMode {
 pub struct ApTriggerConfig {
     /// Trigger Packet Frequency
     trigger_freq_hz: u32,
-    /// Source Port #
-    src_port: u16,
-    /// Trigger Channel
-    channel: u8,
+    /// Local Port #
+    local_port: u16,
     /// Trigger Type - Broadcast or Unicast
     trigger_type: TriggerType,
     /// Trigger Sequence Number Start
@@ -72,8 +72,7 @@ impl Default for ApTriggerConfig {
     fn default() -> Self {
         Self {
             trigger_freq_hz: 10,
-            src_port: 10789,
-            channel: 1,
+            local_port: 10789,
             trigger_type: TriggerType::Broadcast,
             trigger_seq_num: 0,
         }
@@ -90,36 +89,39 @@ enum TriggerType {
 /// Driver Struct to Enable CSI collection as an Access Point
 pub struct CSIAccessPoint {
     /// Access Point Configuration
-    pub ap_config: AccessPointConfiguration,
+    // pub ap_config: AccessPointConfiguration,
     /// Operation Mode: Trigger or Monitor
     pub op_mode: ApOperationMode,
-    controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
+    // controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSIAccessPoint {
     /// Creates a new `CSIAccessPoint` instance with a defined configuration/profile.
-    pub fn new(ap_config: AccessPointConfiguration, op_mode: ApOperationMode) -> Self {
-        let controller_rx = CONTROLLER_CH.receiver();
-        Self {
-            ap_config,
-            op_mode,
-            controller_rx,
-        }
+    /// 'AccessPointConfiguration' Defines the WiFi Access Point Connection Parameters
+    /// 'ApOperationMode' Defines the Operation Mode: Trigger or Monitor
+    /// 'WifiController' Is a WiFi Controller instance
+    pub async fn new(
+        ap_config: AccessPointConfiguration,
+        op_mode: ApOperationMode,
+        wifi_controller: WifiController<'static>,
+    ) -> Self {
+        // Send shared data to global context
+        CONTROLLER_CH.send(wifi_controller).await;
+        ACCESSPOINT_CONFIG_CH.send(ap_config.clone()).await;
+        Self { op_mode }
     }
 
     /// Creates a new `CSIAccessPoint` instance with defaults.
-    pub fn new_with_defaults() -> Self {
-        let controller_rx = CONTROLLER_CH.receiver();
+    /// 'AccessPointConfiguration' is set to 'default'
+    /// 'ApOperationMode' is set to Monitor
+    pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
+        CONTROLLER_CH.send(wifi_controller).await;
+        ACCESSPOINT_CONFIG_CH
+            .send(AccessPointConfiguration::default())
+            .await;
         Self {
-            ap_config: AccessPointConfiguration::default(),
             op_mode: ApOperationMode::Monitor,
-            controller_rx: controller_rx,
         }
-    }
-
-    /// Updates `CSIAccessPoint` AP Configuration
-    pub fn update_config(&mut self, ap_config: AccessPointConfiguration) {
-        self.ap_config = ap_config;
     }
 
     /// Initialize WiFi and the CSI Collection System. This method spawns the connection, DHCP, and network tasks.
@@ -149,12 +151,24 @@ impl CSIAccessPoint {
             seed,
         );
 
-        // Spawn connection, runner, and DHCP server tasks
+        // Spawn network task
         spawner.spawn(net_task(ap_runner)).ok();
+        println!("Network Task Running");
+
+        // Configure WiFi Client/Station Connection
+        configure_connection(ConnectionType::AccessPoint).await;
+
+        // Start & Connect WiFi
+        // This needs to be done before DHCP and NTP
+        start_wifi().await;
+
         spawner
             .spawn(run_dhcp_server(ap_stack, gw_ip_addr_str))
             .ok();
         spawner.spawn(ap_connection()).ok();
+
+        // Wait for DHCP to complete
+        DHCP_COMPLETE.wait().await;
 
         match self.op_mode {
             ApOperationMode::Trigger(config) => {
@@ -164,8 +178,6 @@ impl CSIAccessPoint {
             _ => {}
         }
 
-        // Wait for DHCP to complete
-        DHCP_COMPLETE.wait().await;
         // Initialization Finished
         println!("Access Point Initialized");
         Ok(())
@@ -173,39 +185,39 @@ impl CSIAccessPoint {
 
     /// Starts the Access Point & Loads Configuration
     /// To reconfigure AP settings, no need to reinit, only call start again with the updated configuration.
-    pub async fn start(&self, mut controller: WifiController<'static>) {
-        let config = Configuration::AccessPoint(self.ap_config.clone());
-        match controller.set_configuration(&config) {
-            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
-            Err(_) => {
-                println!("WiFi Configuration Error");
-                println!("Error Config: {:?}", config);
-            }
-        }
-
-        if !matches!(controller.is_started(), Ok(true)) {
-            let config = Configuration::AccessPoint(self.ap_config.clone());
-            controller.set_configuration(&config).unwrap();
-            println!("Starting wifi");
-            controller.start_async().await.unwrap();
-            println!("Wifi started!");
-        }
-
-        // Signal Collection Start
-        START_COLLECTION_.signal(true);
-        // Share WiFi Controller to Global Context
-        CONTROLLER_CH.send(controller).await;
+    pub async fn start_collection(&self) {
+        start_collection(crate::ConnectionType::AccessPoint).await;
     }
 
-    /// Stops Collection & Returns WiFi Controller Instance
-    pub async fn stop(&self) -> WifiController<'static> {
-        START_COLLECTION_.signal(false);
-        self.controller_rx.receive().await
+    // pub async fn start(&self, mut controller: WifiController<'static>) {
+    //     if !matches!(controller.is_started(), Ok(true)) {
+    //         let config = Configuration::AccessPoint(self.ap_config.clone());
+    //         match controller.set_configuration(&config) {
+    //             Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+    //             Err(e) => {
+    //                 println!("{:?}", e);
+    //                 println!("Error Config: {:?}", config);
+    //             }
+    //         }
+    //         println!("Starting wifi");
+    //         controller.start_async().await.unwrap();
+    //         println!("Wifi started!");
+    //     }
+
+    //     // Signal Collection Start
+    //     START_COLLECTION_.signal(true);
+    //     // Share WiFi Controller to Global Context
+    //     CONTROLLER_CH.send(controller).await;
+    // }
+
+    /// Stops Collection
+    pub async fn stop_collection(&self) {
+        stop_collection();
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
-        self.controller_rx.receive().await
+        recapture_controller().await
     }
 
     /// Retrieve the latest available CSI data packet
@@ -215,10 +227,12 @@ impl CSIAccessPoint {
             ApOperationMode::Monitor => Err(crate::error::Error::SystemError(
                 "get_csi_data_raw() not supported in Monitor Mode",
             )),
-            _ => {
-                // Wait for CSI data packet to update
-                todo!();
-            }
+            _ => match reconstruct_csi_from_udp().await {
+                Ok(csi_pkt) => Ok(csi_pkt),
+                Err(_e) => Err(crate::error::Error::SystemError(
+                    "Error reconstructing recieved CSI message",
+                )),
+            },
         }
     }
 
@@ -235,6 +249,15 @@ impl CSIAccessPoint {
                 Ok(csi_raw_pkt)
             }
         }
+    }
+
+    /// Print the latest CSI data with metadata to console
+    pub async fn print_csi_w_metadata(&mut self) {
+        // Wait for CSI data packet to update
+        let proc_csi_data = reconstruct_csi_from_udp().await.unwrap();
+
+        // Print the CSI data to console
+        proc_csi_data.print_csi_w_metadata();
     }
 }
 
@@ -436,24 +459,120 @@ async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) {
     );
 
     println!("Binding");
-    // Bind to specified source port
-    socket.bind(config.src_port).unwrap();
+    // Bind to specified local port
+    socket.bind(config.local_port).unwrap();
 
     // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
     let mut message_u8: Vec<u8, 619> = Vec::new();
 
     loop {
         socket.recv_from(&mut message_u8).await.unwrap();
-        // Semd the recieved raw CSI data to the global channel for processing
+        // Send the recieved raw CSI data to the global channel for processing
         CSI_UDP_RAW_CH.send(message_u8.clone()).await;
         // Clear the message buffer for next recieve
         message_u8.clear();
     }
 }
 
-async fn reconstruct_csi_from_udp() {
+/// Reconstructs a `CSIDataPacket` from a UDP message buffer received in Monitor mode.
+///
+/// The expected format of `raw_csi_data` is:
+/// - Bytes 0-1: u16 sequence_number (big-endian)
+/// - Byte 2: u8 data_format (as repr of RxCSIFmt)
+/// - Bytes 3-6: u32 timestamp (big-endian)
+/// - Bytes 7..end: CSI data (u8 cast from original i8, up to 612 bytes)
+///
+/// Fields not transmitted (e.g., MAC, RSSI, rate, etc.) are set to default values:
+/// - u32/i32 fields: 0
+/// - mac: [0; 6]
+/// - date_time: None
+/// - sig_len: 0 (cannot be reliably reconstructed without additional data)
+/// - rx_state: 0 (assumes no error)
+///
+/// Returns an error if the buffer length is invalid (<7 bytes or CSI data >612 bytes).
+pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
     // Retrive the new CSI raw data from UDP channel
-    let _raw_csi_data = CSI_UDP_RAW_CH.receive().await;
-    // Process the raw CSI data as needed
-    todo!()
+    let raw_csi_data = CSI_UDP_RAW_CH.receive().await;
+
+    if raw_csi_data.len() < 7 {
+        return Err(crate::error::Error::SystemError(
+            "Buffer too short: must be at least 7 bytes",
+        ));
+    }
+
+    let csi_data_start = 7;
+    let csi_len = (raw_csi_data.len() - csi_data_start) as u16;
+    if csi_len > 612 {
+        return Err(crate::error::Error::SystemError(
+            "CSI data too long: max 612 bytes",
+        ));
+    }
+
+    // Extract sequence_number (u16 Big Endian)
+    let sequence_number = u16::from_be_bytes([raw_csi_data[0], raw_csi_data[1]]);
+
+    // Extract data_format (u8 -> RxCSIFmt)
+    let fmt_u8 = raw_csi_data[2];
+    let (data_format, bandwidth, sig_mode, stbc, secondary_channel) = match fmt_u8 {
+        0 => (RxCSIFmt::Bw20, 0, 0, 0, 0),
+        1 => (RxCSIFmt::HtBw20, 0, 1, 0, 0),
+        2 => (RxCSIFmt::HtBw20Stbc, 0, 1, 1, 0),
+        3 => (RxCSIFmt::SecbBw20, 0, 0, 0, 2),
+        4 => (RxCSIFmt::SecbHtBw20, 0, 1, 0, 2),
+        5 => (RxCSIFmt::SecbHtBw20Stbc, 0, 1, 1, 2),
+        6 => (RxCSIFmt::SecbHtBw40, 1, 1, 0, 2),
+        7 => (RxCSIFmt::SecbHtBw40Stbc, 1, 1, 1, 2),
+        8 => (RxCSIFmt::SecaBw20, 0, 0, 0, 1),
+        9 => (RxCSIFmt::SecaHtBw20, 0, 1, 0, 1),
+        10 => (RxCSIFmt::SecaHtBw20Stbc, 0, 1, 1, 1),
+        11 => (RxCSIFmt::SecaHtBw40, 1, 1, 0, 1),
+        12 => (RxCSIFmt::SecaHtBw40Stbc, 1, 1, 1, 1),
+        _ => (RxCSIFmt::Undefined, 0, 0, 0, 0),
+    };
+
+    // Extract timestamp (u32 BE)
+    let timestamp = u32::from_be_bytes([
+        raw_csi_data[3],
+        raw_csi_data[4],
+        raw_csi_data[5],
+        raw_csi_data[6],
+    ]);
+
+    // Reconstruct CSI data (u8 -> i8, preserving sign via bit reinterpretation)
+    let mut csi_data = Vec::new();
+    for &b in &raw_csi_data[csi_data_start..] {
+        csi_data
+            .push(b as i8)
+            .map_err(|_| "Failed to push to Vec (capacity exceeded)")
+            .unwrap();
+    }
+
+    // Build CSIDataPacket with defaults for missing fields
+    Ok(CSIDataPacket {
+        mac: [0u8; 6],
+        rssi: 0,
+        timestamp,
+        rate: 0,
+        sgi: 0,
+        secondary_channel: secondary_channel,
+        channel: 0,
+        bandwidth: bandwidth,
+        antenna: 0,
+        sig_mode: sig_mode,
+        mcs: 0,
+        smoothing: 0,
+        not_sounding: 0,
+        aggregation: 0,
+        stbc: stbc,
+        fec_coding: 0,
+        ampdu_cnt: 0,
+        noise_floor: 0,
+        rx_state: 0,
+        sig_len: 0,
+        date_time: None,
+        sequence_number,
+        data_format,
+        csi_data_len: csi_len,
+        csi_data,
+    })
 }

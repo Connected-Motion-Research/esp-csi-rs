@@ -3,6 +3,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::watch::Receiver;
 
+use esp_hal::config;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
@@ -11,7 +12,7 @@ use embassy_futures::select::{select, Either};
 use embassy_net::{
     raw::{IpProtocol, IpVersion, PacketMetadata as RawPacketMetadata, RawSocket},
     udp::{PacketMetadata, UdpSocket},
-    IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
+    IpEndpoint, Stack, StackResources,
 };
 
 use embassy_time::{Duration, Instant, Timer};
@@ -21,7 +22,7 @@ use enumset::enum_set;
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
-use esp_wifi::wifi::WifiController;
+use esp_wifi::wifi::{self, WifiController};
 use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice, WifiEvent};
 
 use crate::collector::run_dhcp_client;
@@ -30,14 +31,15 @@ use crate::error::Result;
 use heapless::Vec;
 
 use crate::{
-    build_csi_config, capture_csi_info, get_sntp_time, net_task, process_csi_packet,
-    unix_to_date_time,
+    build_csi_config, capture_csi_info, configure_connection, connect_wifi, get_sntp_time,
+    net_task, process_csi_packet, recapture_controller, run_ntp_sync, start_collection, start_wifi,
+    stop_collection, unix_to_date_time, ConnectionType,
 };
 use crate::{sequence_sync_task, CSIConfig};
 
 use crate::{
-    CSIDataPacket, DateTimeCapture, CONTROLLER_CH, CSI_CONFIG_CH, DATE_TIME, DATE_TIME_VALID,
-    DHCP_CLIENT_INFO, MAC_FIL_CH, PROC_CSI_DATA, SEQ_NUM_EN, START_COLLECTION_,
+    CSIDataPacket, DateTimeCapture, CLIENT_CONFIG_CH, CONTROLLER_CH, CSI_CONFIG_CH, DATE_TIME,
+    DATE_TIME_VALID, DHCP_CLIENT_INFO, MAC_FIL_CH, PROC_CSI_DATA, SEQ_NUM_EN, START_COLLECTION_,
 };
 
 macro_rules! mk_static {
@@ -49,36 +51,35 @@ macro_rules! mk_static {
     }};
 }
 
-/// Access Point Operation Modes
-/// Trigger: Sends trigger packets to stimulate CSI collection locally.
-/// Monitor: Monitors incoming trigger Packets stimulating CSI collection and sends back collected CSI to trigger source.
-
+/// Station Operation Modes
+/// Trigger: Sends trigger packets (traffic) to stimulate CSI collection locally.
+/// Monitor: Monitors incoming trigger packets stimulating CSI collection and sends back collected CSI to trigger source in UDP packet.
 #[derive(PartialEq, Copy, Clone)]
 pub enum StaOperationMode {
     Trigger(StaTriggerConfig),
     Monitor(StaMonitorConfig),
 }
 
-/// Configuration for Access Point Monitor Mode
+/// Configuration for Station Monitor Mode
 #[derive(PartialEq, Copy, Clone)]
 pub struct StaMonitorConfig {
     /// Source Port #
-    src_port: u16,
+    local_port: u16,
     /// Destination Port #
     dest_port: u16,
 }
 
-/// Configuration for Access Point Trigger Mode
+/// Configuration for Station Trigger Mode
 #[derive(PartialEq, Copy, Clone)]
 pub struct StaTriggerConfig {
     /// Trigger Packet Frequency
-    trigger_freq_hz: u32,
+    pub trigger_freq_hz: u32,
 }
 
 impl Default for StaMonitorConfig {
     fn default() -> Self {
         Self {
-            src_port: 10789,
+            local_port: 10789,
             dest_port: 10789,
         }
     }
@@ -94,61 +95,69 @@ impl Default for StaTriggerConfig {
 
 /// Driver Struct to Collect CSI as a Station
 pub struct CSIStation {
-    /// CSI Collection Parameters
-    pub csi_config: CSIConfig,
-    // Station/Client Configuration
-    pub sta_config: ClientConfiguration,
     /// Operation Mode: Trigger or Monitor
     pub op_mode: StaOperationMode,
-    /// Optional MAC Address Filter for CSI Data
-    pub mac_filter: Option<[u8; 6]>,
     /// Synchronize NTP Time with Trigger Source
     /// Note: Requires internet connectivity at the Access Point
     pub sync_time: bool,
     csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
-    controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSIStation {
     /// Creates a new `CSIStation` instance with a defined configuration/profile.
-    pub fn new(
+    /// 'CSIConfig' Defines the CSI Collection Parameters
+    /// 'ClientConfiguration' Defines the WiFi Client/Station Connection Parameters
+    /// 'StaOperationMode' Defines the Operation Mode: Trigger or Monitor
+    /// 'mac_filter' is a' 'Option<[u8; 6]>' Optional MAC Address Filter for CSI Data
+    /// 'sync_time' is to synchronize time with NTP server at Access Point (requirecs internet connectivity at AP)
+    /// 'WifiController' Is a WiFi Controller instance
+    pub async fn new(
         csi_config: CSIConfig,
         sta_config: ClientConfiguration,
         op_mode: StaOperationMode,
         mac_filter: Option<[u8; 6]>,
         sync_time: bool,
+        wifi_controller: WifiController<'static>,
     ) -> Self {
         let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CONTROLLER_CH.receiver();
+        // Send shared data to global context
+        CONTROLLER_CH.send(wifi_controller).await;
+        CSI_CONFIG_CH.send(csi_config).await;
+        MAC_FIL_CH.send(mac_filter).await;
+        CLIENT_CONFIG_CH.send(sta_config.clone()).await;
         Self {
-            csi_config,
-            sta_config,
-            mac_filter,
+            // csi_config,
+            // sta_config,
+            // mac_filter,
             op_mode,
             csi_data_rx,
-            controller_rx,
+            // controller_rx,
             sync_time,
         }
     }
 
     /// Creates a new `CSIStation` instance with defaults.
-    pub fn new_with_defaults() -> Self {
+    /// 'CSIConfig' is set to 'default'
+    /// 'ClientConfiguration' is set to 'default'
+    /// 'StaOperationMode' is set to Trigger with default trigger configuration
+    /// 'mac_filter' is set to 'None'
+    /// 'sync_time' is set to 'false'
+    pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
         let proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CONTROLLER_CH.receiver();
+        // let controller_rx = CONTROLLER_CH.receiver();
+        CONTROLLER_CH.send(wifi_controller).await;
+        CSI_CONFIG_CH.send(CSIConfig::default()).await;
+        MAC_FIL_CH.send(None).await;
+        CLIENT_CONFIG_CH.send(ClientConfiguration::default()).await;
         Self {
-            csi_config: CSIConfig::default(),
-            sta_config: ClientConfiguration::default(),
-            mac_filter: None,
+            // csi_config: CSIConfig::default(),
+            // sta_config: ClientConfiguration::default(),
+            // mac_filter: None,
             op_mode: StaOperationMode::Trigger(StaTriggerConfig::default()),
             csi_data_rx: proc_csi_data_rx,
-            controller_rx: controller_rx,
+            // controller_rx: controller_rx,
             sync_time: false,
         }
-    }
-
-    /// Updates `CSIStation` Client Configuration
-    pub fn update_config(&mut self, sta_config: ClientConfiguration) {
-        self.sta_config = sta_config;
     }
 
     /// Initialize WiFi and the CSI Collection System. This method starts the WiFi connection and spawns the required tasks.
@@ -167,8 +176,17 @@ impl CSIStation {
             seed,
         );
 
-        // Spawn the network runner task to run DHCP and NTP
+        // Spawn the network runner task
         spawner.spawn(net_task(sta_runner)).ok();
+        println!("Network Task Running");
+
+        // Configure WiFi Client/Station Connection
+        configure_connection(ConnectionType::Client).await;
+
+        // Start & Connect WiFi
+        // This needs to be done before DHCP and NTP
+        start_wifi().await;
+        connect_wifi().await;
 
         // Run DHCP Client to acquire IP
         run_dhcp_client(sta_stack).await;
@@ -198,64 +216,20 @@ impl CSIStation {
         Ok(())
     }
 
-    /// Starts CSI Collection
-    pub async fn start(&self, mut controller: WifiController<'static>) {
-        // Send Updated CSI & MAC Filter Configs
-        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
-        MAC_FIL_CH.send(self.mac_filter).await;
-        // Send Station Configuration
-        let config = Configuration::Client(self.sta_config.clone());
-        match controller.set_configuration(&config) {
-            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
-            Err(_) => {
-                println!("WiFi Configuration Error");
-                println!("Error Config: {:?}", config);
-            }
-        }
-
-        // In case controller isnt started already, start it
-        if !matches!(controller.is_started(), Ok(true)) {
-            controller.start_async().await.unwrap();
-            println!("Wifi started!");
-        }
-
-        // Establish Connection with Access Point
-        for attempt in 1..=3 {
-            println!("Connecting (attempt {}/{})...", attempt, 3);
-            match controller.connect_async().await {
-                Ok(_) => {
-                    println!("Connected!");
-                    break;
-                }
-                Err(e) => {
-                    println!("Connection attempt {} failed: {:?}", attempt, e);
-                    if attempt < 3 {
-                        println!("Trying again...");
-                        Timer::after(Duration::from_millis(3000)).await;
-                    } else {
-                        println!("All connection attempts failed.");
-                    }
-                }
-            }
-        }
-
-        // Signal Collection Start
-        START_COLLECTION_.signal(true);
-
-        // Share WiFi Controller to Global Context
-        // This is such that the controller can be returned if the Collection needs to be recaptured
-        CONTROLLER_CH.send(controller).await;
+    /// Starts the Station & Loads Configuration
+    /// To reconfigure Station settings, no need to reinit, only call start again with the updated configuration.
+    pub async fn start_collection(&self) {
+        start_collection(crate::ConnectionType::Client).await;
     }
 
     /// Stops Collection
-    pub async fn stop(&self) -> WifiController<'static> {
-        START_COLLECTION_.signal(false);
-        self.controller_rx.receive().await
+    pub async fn stop_collection(&self) {
+        stop_collection();
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
-        self.controller_rx.receive().await
+        recapture_controller().await
     }
 
     /// Retrieve the latest available CSI data packet
@@ -440,7 +414,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
 
             println!("Binding");
             // Bind to specified source port
-            socket.bind(monitor_config.src_port).unwrap();
+            socket.bind(monitor_config.local_port).unwrap();
             // Endpoint to send back collected CSI data
             let endpoint = IpEndpoint::new(
                 embassy_net::IpAddress::Ipv4(ip_info.gateway_address),
@@ -501,52 +475,4 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
             }
         }
     }
-}
-
-async fn run_ntp_sync(sta_stack: Stack<'static>) {
-    println!("Running NTP Sync");
-    // Get Current SNTP unix time values
-    match get_sntp_time(sta_stack).await {
-        Ok((seconds, milliseconds)) => {
-            // Convert captured time to date/time values
-            let time_capture = unix_to_date_time(seconds.into(), milliseconds);
-
-            // Print the time captured for validation
-            println!(
-                "Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                time_capture.0,
-                time_capture.1,
-                time_capture.2,
-                time_capture.3,
-                time_capture.4,
-                time_capture.5,
-                time_capture.6
-            );
-
-            // Store the captured time instant values to DateTimeCapture struct
-            let time = DateTimeCapture {
-                captured_at: Instant::now(),
-                captured_secs: seconds as u64,
-                captured_millis: milliseconds,
-            };
-
-            // Move DateTimeCapture struct to Global Context
-            match DATE_TIME.init(time) {
-                Ok(_) => {
-                    println!("Time Captured");
-                    DATE_TIME_VALID.store(true, core::sync::atomic::Ordering::Relaxed);
-                }
-                Err(_) => {
-                    println!("Failed to Capture Time");
-                    DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-        Err(_) => {
-            println!("Failed to get SNTP time, Proceeding with default.");
-            DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    // Signal that NTP Sync is complete
-    // NTP_SYNC_COMPLETE.signal(());
 }

@@ -15,9 +15,10 @@
 
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::Subscriber};
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
+    collector::{CSIStation, StaMonitorConfig, StaOperationMode, StaTriggerConfig},
     config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
@@ -25,7 +26,7 @@ use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
-use esp_wifi::{init, EspWifiController};
+use esp_wifi::{init, wifi::ClientConfiguration, EspWifiController};
 use heapless::Vec;
 
 esp_app_desc!();
@@ -74,45 +75,51 @@ async fn main(spawner: Spawner) {
 
     println!("WiFi Controller Initialized");
 
-    // Create a CSI collector configuration
-    // Device configured as a Station
-    // Traffic is enabled with UDP packets
-    // Traffic (UDP packets) is generated every 1000 milliseconds
-    // Network Architechture is AccessPointStation (no NTP time collection)
-    let csi_collector = CSICollector::new(
-        WiFiConfig {
-            ssid: "SSID".try_into().unwrap(),
-            password: "PASSWORD".try_into().unwrap(),
+    // Create a CSI collector statiom configuration to monitor for external traffic
+    let mut csi_coll_sta = CSIStation::new(
+        CSIConfig::default(),
+        ClientConfiguration {
+            ssid: "AP_SSID".into(),
+            password: "AP_PASS".into(),
             ..Default::default()
         },
-        esp_csi_rs::WiFiMode::Station,
-        CSIConfig::default(),
-        TrafficConfig {
-            traffic_type: TrafficType::UDP,
-            traffic_interval_ms: 1000,
-        },
-        false,
-        NetworkArchitechture::AccessPointStation,
+        // Configure the STA to Monitor Mode
+        // Config defaults to 10789 for both local and destination ports
+        StaOperationMode::Monitor(StaMonitorConfig::default()),
+        // Don't filter any MAC addresses
+        // Ideally should filter for MAC address of connecting AP triggering traffic
+        // This reduces noise from other non-relevant packets in the environment
         None,
+        // Set to true only if there is an internet connection at AP
         false,
     );
 
     // Initalize CSI collector
-    csi_collector
-        .init(controller, interfaces, seed, &spawner)
-        .unwrap();
+    csi_coll_sta.init(interfaces, &spawner).await.unwrap();
 
-    // Collect CSI for 5 seconds
-    let csi = csi_collector.start(Some(5));
-    // To run indefinely, use the following line instead
-    // let csi = csi_collector.start(None);
+    // Start Collection
+    csi_coll_sta.start(controller).await;
+
+    // Collect/Monitor for 10 Seconds
+    Timer::after(Duration::from_secs(10)).await;
+
+    // Stop Collection & capture controller
+    let controller = csi_coll_sta.stop().await;
+
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
+
+    // Start Collection
+    csi_coll_sta.start(controller).await;
+
+    // Collect for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Stop Collection
+    // No need to capture controller
+    let _ = csi_coll_sta.stop().await;
 
     loop {
-        let csi = csi_collector.get_csi_data().await;
-        // csi_collector.print_csi_w_metadata().await;
-        println!("CSI Data printed from Main:");
-        println!("{:?}", csi);
-        println!("");
         Timer::after(Duration::from_secs(1)).await
     }
 }
