@@ -1,9 +1,7 @@
 //! Example of Configuring Sniffer Mode for CSI Collection
 //!
-//! This configuration allows the collection of CSI data by sniffing WiFi networks.
+//! This configuration will capture CSI data from all the devices in range.
 //! Only one device is needed in this configuration. No SSID or Password need to be defined.
-//!
-//! This is also the default configuraion in `WiFiConfig`. Though Sniffer mode can also be explicitly defined.
 
 #![no_std]
 #![no_main]
@@ -61,7 +59,7 @@ async fn main(spawner: Spawner) {
 
     // Create a Sniffer CSI Collector
     // Don't filter any MAC addresses out
-    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None);
+    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None, controller);
 
     // Initialize CSI Collector
     csi_coll_snif.init(interfaces, &spawner).await.unwrap();
@@ -84,9 +82,7 @@ async fn main(spawner: Spawner) {
 
     println!("Starting Again in 3 seconds");
     Timer::after(Duration::from_secs(3)).await;
-
-    // Recapture Controller to start another collection
-    // let controller = csi_coll_snif.recapture_controller().await;
+    println!("Restarting Collection");
 
     // Start Collection
     csi_coll_snif.start(controller).await;

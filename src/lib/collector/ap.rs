@@ -1,6 +1,4 @@
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
 
 use heapless::Vec;
 use smoltcp::phy::ChecksumCapabilities;
@@ -21,7 +19,7 @@ use core::{net::Ipv4Addr, str::FromStr};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
-use esp_wifi::wifi::{AccessPointConfiguration, Configuration, Interfaces};
+use esp_wifi::wifi::{AccessPointConfiguration, Interfaces};
 use esp_wifi::wifi::{WifiController, WifiDevice, WifiEvent};
 
 use crate::error::Result;
@@ -29,13 +27,12 @@ use crate::error::Result;
 use enumset::enum_set;
 
 use crate::{
-    configure_connection, connect_wifi, net_task, recapture_controller, start_collection,
-    start_wifi, stop_collection, ConnectionType, ACCESSPOINT_CONFIG_CH,
+    configure_connection, net_task, recapture_controller, reconstruct_csi_from_udp,
+    run_dhcp_server, start_collection, start_wifi, stop_collection, ConnectionType,
+    ACCESSPOINT_CONFIG_CH,
 };
 
-use crate::{
-    CSIDataPacket, RxCSIFmt, CONTROLLER_CH, CSI_UDP_RAW_CH, DHCP_COMPLETE, START_COLLECTION_,
-};
+use crate::{CSIDataPacket, CONTROLLER_CH, CSI_UDP_RAW_CH, DHCP_COMPLETE, START_COLLECTION_};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -83,6 +80,7 @@ impl Default for ApTriggerConfig {
 enum TriggerType {
     Broadcast,
     /// Unicast Trigger Type requires an IP Address
+    #[allow(dead_code)]
     Unicast(&'static str),
 }
 
@@ -143,11 +141,11 @@ impl CSIAccessPoint {
         let seed = 123456_u64;
         let ap_interface = interface.ap;
 
-        // Create Network Stack
+        // Create AP Network Stack
         let (ap_stack, ap_runner) = embassy_net::new(
             ap_interface,
             ap_ip_config,
-            mk_static!(StackResources<6>, StackResources::<6>::new()),
+            mk_static!(StackResources<3>, StackResources::<3>::new()),
             seed,
         );
 
@@ -211,7 +209,7 @@ impl CSIAccessPoint {
     // }
 
     /// Stops Collection
-    pub async fn stop_collection(&self) {
+    pub fn stop_collection(&self) {
         stop_collection();
     }
 
@@ -258,50 +256,6 @@ impl CSIAccessPoint {
 
         // Print the CSI data to console
         proc_csi_data.print_csi_w_metadata();
-    }
-}
-
-#[embassy_executor::task]
-async fn run_dhcp_server(stack: Stack<'static>, gw_ip_addr: &'static str) {
-    use core::net::{Ipv4Addr, SocketAddrV4};
-
-    use edge_dhcp::{
-        io::{self, DEFAULT_SERVER_PORT},
-        server::{Server, ServerOptions},
-    };
-    use edge_nal::UdpBind;
-    use edge_nal_embassy::{Udp, UdpBuffers};
-
-    let ip = Ipv4Addr::from_str(gw_ip_addr).expect("DHCP task failed to parse gateway ip");
-
-    let mut buf = [0u8; 1500];
-
-    let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
-
-    let buffers = UdpBuffers::<3, 1024, 1024, 10>::new();
-    let unbound_socket = Udp::new(stack, &buffers);
-    let mut bound_socket = unbound_socket
-        .bind(core::net::SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::UNSPECIFIED,
-            DEFAULT_SERVER_PORT,
-        )))
-        .await
-        .unwrap();
-
-    println!("DHCP Server Running");
-    DHCP_COMPLETE.signal(());
-    let mut server = Server::<_, 64>::new_with_et(ip);
-    loop {
-        _ = io::server::run(
-            &mut server,
-            &ServerOptions::new(ip, Some(&mut gw_buf)),
-            &mut bound_socket,
-            &mut buf,
-        )
-        .await
-        .inspect_err(|_e| println!("DHCP Server Error"));
-        println!("DHCP Buffer: {:?}", buf);
-        Timer::after(Duration::from_millis(500)).await;
     }
 }
 
@@ -353,7 +307,7 @@ pub async fn ap_connection() {
 
 // This task manages network operations for Access Point in Trigger mode
 #[embassy_executor::task]
-async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
+pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
     // Trigger Mode triggers CSI collection by sending ICMP packets at defined frequency
     // ------------------ ICMP Socket Setup ------------------
     let mut rx_buffer = [0; 64];
@@ -441,7 +395,7 @@ async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
 
 // Task to Process the Recieved UDP Packets
 #[embassy_executor::task]
-async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) {
+pub async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) {
     // Flow in trigger mode to recieve and process incoming UDP packets that contain CSI data
 
     // ------------------ UDP Socket Setup ------------------
@@ -472,107 +426,4 @@ async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) {
         // Clear the message buffer for next recieve
         message_u8.clear();
     }
-}
-
-/// Reconstructs a `CSIDataPacket` from a UDP message buffer received in Monitor mode.
-///
-/// The expected format of `raw_csi_data` is:
-/// - Bytes 0-1: u16 sequence_number (big-endian)
-/// - Byte 2: u8 data_format (as repr of RxCSIFmt)
-/// - Bytes 3-6: u32 timestamp (big-endian)
-/// - Bytes 7..end: CSI data (u8 cast from original i8, up to 612 bytes)
-///
-/// Fields not transmitted (e.g., MAC, RSSI, rate, etc.) are set to default values:
-/// - u32/i32 fields: 0
-/// - mac: [0; 6]
-/// - date_time: None
-/// - sig_len: 0 (cannot be reliably reconstructed without additional data)
-/// - rx_state: 0 (assumes no error)
-///
-/// Returns an error if the buffer length is invalid (<7 bytes or CSI data >612 bytes).
-pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
-    // Retrive the new CSI raw data from UDP channel
-    let raw_csi_data = CSI_UDP_RAW_CH.receive().await;
-
-    if raw_csi_data.len() < 7 {
-        return Err(crate::error::Error::SystemError(
-            "Buffer too short: must be at least 7 bytes",
-        ));
-    }
-
-    let csi_data_start = 7;
-    let csi_len = (raw_csi_data.len() - csi_data_start) as u16;
-    if csi_len > 612 {
-        return Err(crate::error::Error::SystemError(
-            "CSI data too long: max 612 bytes",
-        ));
-    }
-
-    // Extract sequence_number (u16 Big Endian)
-    let sequence_number = u16::from_be_bytes([raw_csi_data[0], raw_csi_data[1]]);
-
-    // Extract data_format (u8 -> RxCSIFmt)
-    let fmt_u8 = raw_csi_data[2];
-    let (data_format, bandwidth, sig_mode, stbc, secondary_channel) = match fmt_u8 {
-        0 => (RxCSIFmt::Bw20, 0, 0, 0, 0),
-        1 => (RxCSIFmt::HtBw20, 0, 1, 0, 0),
-        2 => (RxCSIFmt::HtBw20Stbc, 0, 1, 1, 0),
-        3 => (RxCSIFmt::SecbBw20, 0, 0, 0, 2),
-        4 => (RxCSIFmt::SecbHtBw20, 0, 1, 0, 2),
-        5 => (RxCSIFmt::SecbHtBw20Stbc, 0, 1, 1, 2),
-        6 => (RxCSIFmt::SecbHtBw40, 1, 1, 0, 2),
-        7 => (RxCSIFmt::SecbHtBw40Stbc, 1, 1, 1, 2),
-        8 => (RxCSIFmt::SecaBw20, 0, 0, 0, 1),
-        9 => (RxCSIFmt::SecaHtBw20, 0, 1, 0, 1),
-        10 => (RxCSIFmt::SecaHtBw20Stbc, 0, 1, 1, 1),
-        11 => (RxCSIFmt::SecaHtBw40, 1, 1, 0, 1),
-        12 => (RxCSIFmt::SecaHtBw40Stbc, 1, 1, 1, 1),
-        _ => (RxCSIFmt::Undefined, 0, 0, 0, 0),
-    };
-
-    // Extract timestamp (u32 BE)
-    let timestamp = u32::from_be_bytes([
-        raw_csi_data[3],
-        raw_csi_data[4],
-        raw_csi_data[5],
-        raw_csi_data[6],
-    ]);
-
-    // Reconstruct CSI data (u8 -> i8, preserving sign via bit reinterpretation)
-    let mut csi_data = Vec::new();
-    for &b in &raw_csi_data[csi_data_start..] {
-        csi_data
-            .push(b as i8)
-            .map_err(|_| "Failed to push to Vec (capacity exceeded)")
-            .unwrap();
-    }
-
-    // Build CSIDataPacket with defaults for missing fields
-    Ok(CSIDataPacket {
-        mac: [0u8; 6],
-        rssi: 0,
-        timestamp,
-        rate: 0,
-        sgi: 0,
-        secondary_channel: secondary_channel,
-        channel: 0,
-        bandwidth: bandwidth,
-        antenna: 0,
-        sig_mode: sig_mode,
-        mcs: 0,
-        smoothing: 0,
-        not_sounding: 0,
-        aggregation: 0,
-        stbc: stbc,
-        fec_coding: 0,
-        ampdu_cnt: 0,
-        noise_floor: 0,
-        rx_state: 0,
-        sig_len: 0,
-        date_time: None,
-        sequence_number,
-        data_format,
-        csi_data_len: csi_len,
-        csi_data,
-    })
 }

@@ -1,6 +1,5 @@
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::watch::Receiver;
 
 use esp_alloc as _;
@@ -11,8 +10,9 @@ use esp_wifi::wifi::WifiController;
 
 use crate::error::Result;
 
+use crate::recapture_controller;
 use crate::CSIConfig;
-use crate::{build_csi_config, capture_csi_info, process_csi_packet};
+use crate::{build_csi_config, capture_csi_info, process_csi_packet, stop_collection};
 
 use crate::{
     CSIDataPacket, CONTROLLER_CH, CSI_CONFIG_CH, MAC_FIL_CH, PROC_CSI_DATA, START_COLLECTION_,
@@ -21,35 +21,35 @@ use crate::{
 /// Driver Struct to Collect CSI as a Sniffer
 pub struct CSISniffer {
     /// CSI Collection Parameters
-    pub csi_config: CSIConfig,
+    // pub csi_config: CSIConfig,
     /// MAC Address Filter for CSI Data
-    pub mac_filter: Option<[u8; 6]>,
+    // pub mac_filter: Option<[u8; 6]>,
     csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
-    controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
+    // controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSISniffer {
     /// Creates a new `CSISniffer` instance with a defined configuration/profile.
-    pub fn new(csi_config: CSIConfig, mac_filter: Option<[u8; 6]>) -> Self {
+    pub async fn new(
+        csi_config: CSIConfig,
+        mac_filter: Option<[u8; 6]>,
+        wifi_controller: WifiController<'static>,
+    ) -> Self {
         let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CONTROLLER_CH.receiver();
-        Self {
-            csi_config,
-            mac_filter,
-            csi_data_rx,
-            controller_rx,
-        }
+        CONTROLLER_CH.send(wifi_controller).await;
+        CSI_CONFIG_CH.send(csi_config).await;
+        MAC_FIL_CH.send(mac_filter).await;
+        Self { csi_data_rx }
     }
 
     /// Creates a new `CSISniffer` instance with defaults.
-    pub fn new_with_defaults() -> Self {
+    pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
         let proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CONTROLLER_CH.receiver();
+        CONTROLLER_CH.send(wifi_controller).await;
+        CSI_CONFIG_CH.send(CSIConfig::default()).await;
+        MAC_FIL_CH.send(None).await;
         Self {
-            csi_config: CSIConfig::default(),
-            mac_filter: None,
             csi_data_rx: proc_csi_data_rx,
-            controller_rx: controller_rx,
         }
     }
 
@@ -67,26 +67,19 @@ impl CSISniffer {
     }
 
     /// Starts CSI Collection
-    pub async fn start(&self, controller: WifiController<'static>) {
-        // Send Updated Configs
-        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
-        MAC_FIL_CH.send(self.mac_filter).await;
-        // Share WiFi Controller to Global Context
-        // This is such that the controller can be returned if the Collection is deinitalized
-        CONTROLLER_CH.send(controller).await;
+    pub async fn start_collection(&self) {
         // Signal start collection
         START_COLLECTION_.signal(true);
     }
 
     /// Stops Collection
-    pub async fn stop(&self) -> WifiController<'static> {
-        START_COLLECTION_.signal(false);
-        self.controller_rx.receive().await
+    pub fn stop_collection(&self) {
+        stop_collection();
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
-        self.controller_rx.receive().await
+        recapture_controller().await
     }
 
     /// Retrieve the latest available CSI data packet

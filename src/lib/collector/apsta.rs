@@ -1,10 +1,8 @@
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
 
+use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::{IpEndpoint, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 use embassy_time::{Duration, Timer};
-
-use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 
 use core::{net::Ipv4Addr, str::FromStr};
 
@@ -12,14 +10,22 @@ use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
 use esp_wifi::wifi::WifiController;
-use esp_wifi::wifi::{AccessPointConfiguration, ClientConfiguration, Configuration, Interfaces};
+use esp_wifi::wifi::{AccessPointConfiguration, ClientConfiguration, Interfaces};
 
 use crate::error::Result;
 
 use crate::collector::ap::{ap_connection, ApOperationMode};
-use crate::{net_task, run_dhcp_server, IpInfo};
+use crate::{
+    configure_connection, connect_wifi, net_task, recapture_controller, reconstruct_csi_from_udp,
+    run_dhcp_client, run_dhcp_server, start_collection, start_wifi, stop_collection, CSIDataPacket,
+    ConnectionType, ACCESSPOINT_CONFIG_CH, CLIENT_CONFIG_CH, CSI_UDP_RAW_CH, DHCP_CLIENT_INFO,
+};
 
-use crate::{CONTROLLER_CH, DHCP_CLIENT_INFO, DHCP_COMPLETE, PROC_CSI_DATA, START_COLLECTION_};
+use crate::collector::{ap_icmp_trigger, ap_udp_receiver};
+
+use heapless::Vec;
+
+use crate::{CONTROLLER_CH, DHCP_COMPLETE};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -31,52 +37,39 @@ macro_rules! mk_static {
 }
 
 /// Driver Struct to Collect CSI as a Access Point + Station
+/// Note: The station purpose in this mode is to connect to a router/access point for internet access
 pub struct CSIAccessPointStation {
-    /// Access Point Configuration
-    pub ap_config: AccessPointConfiguration,
-    /// Station/Client Configuration
-    pub sta_config: ClientConfiguration,
     /// Operation Mode: Trigger or Monitor
     pub op_mode: ApOperationMode,
-    controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSIAccessPointStation {
     /// Creates a new `CSIAccessPointStation` instance with a defined configuration/profile.
-    pub fn new(
+    pub async fn new(
         ap_config: AccessPointConfiguration,
         sta_config: ClientConfiguration,
         op_mode: ApOperationMode,
+        wifi_controller: WifiController<'static>,
     ) -> Self {
-        let controller_rx = CONTROLLER_CH.receiver();
-        Self {
-            ap_config,
-            sta_config,
-            op_mode,
-            controller_rx,
-        }
+        CONTROLLER_CH.send(wifi_controller).await;
+        ACCESSPOINT_CONFIG_CH.send(ap_config.clone()).await;
+        CLIENT_CONFIG_CH.send(sta_config.clone()).await;
+        Self { op_mode }
     }
 
-    /// Creates a new `CSISniffer` instance with defaults.
-    pub fn new_with_defaults() -> Self {
-        let _proc_csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
-        let controller_rx = CONTROLLER_CH.receiver();
+    /// Creates a new `CSIAccessPointStation` instance with defaults.
+    /// 'AccessPointConfiguration' is set to 'default'
+    /// 'StationConfiguration' is set to 'default'
+    /// 'ApOperationMode' is set to Monitor
+    pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
+        CONTROLLER_CH.send(wifi_controller).await;
+        ACCESSPOINT_CONFIG_CH
+            .send(AccessPointConfiguration::default())
+            .await;
+        CLIENT_CONFIG_CH.send(ClientConfiguration::default()).await;
         Self {
-            ap_config: AccessPointConfiguration::default(),
-            sta_config: ClientConfiguration::default(),
             op_mode: ApOperationMode::Monitor,
-            controller_rx: controller_rx,
         }
-    }
-
-    /// Updates `CSIAccessPointStation` AP Configuration
-    pub fn update_ap_config(&mut self, ap_config: AccessPointConfiguration) {
-        self.ap_config = ap_config;
-    }
-
-    /// Updates `CSIAccessPointStation` STA Configuration
-    pub fn update_sta_config(&mut self, sta_config: ClientConfiguration) {
-        self.sta_config = sta_config;
     }
 
     /// Initialize WiFi and the CSI Collection System. This method spawns the connection, DHCP, and network tasks.
@@ -121,6 +114,14 @@ impl CSIAccessPointStation {
         spawner.spawn(net_task(ap_runner)).ok();
         spawner.spawn(net_task(sta_runner)).ok();
 
+        // Configure WiFi Access Point + Client/Station Connection
+        configure_connection(ConnectionType::Mixed).await;
+
+        // Start & Connect WiFi
+        // This needs to be done before DHCP and NTP
+        start_wifi().await;
+        connect_wifi().await;
+
         // Run DHCP Client for STA to acquire IP
         run_dhcp_client(sta_stack).await;
 
@@ -130,95 +131,132 @@ impl CSIAccessPointStation {
             .ok();
         spawner.spawn(ap_connection()).ok();
 
-        // Wait for Net Task to Complete
-        // NET_TASK_COMPLETE.wait().await;
-        // Wait for DHCP Server to Run before finishing init
+        // TEST
+        // spawner.spawn(udp_network_ops(sta_stack)).ok();
+        // TEST END
+
+        // Wait for DHCP to complete
         DHCP_COMPLETE.wait().await;
-        // No need to wait on DHCP since its awaited in init above
+
+        match self.op_mode {
+            ApOperationMode::Trigger(config) => {
+                spawner.spawn(ap_icmp_trigger(ap_stack, config)).ok();
+                spawner.spawn(ap_udp_receiver(ap_stack, config)).ok();
+            }
+            _ => {}
+        }
+
         // Initialization Finished
-        println!("Access Point Initialized");
+        println!("Access Point + Station Initialized");
 
         Ok(())
     }
 
     /// Starts the Access Point + Station & Loads Configuration
     /// To reconfigure AP/STA settings, no need to reinit, only call start again with the updated configuration.
-    pub async fn start(&self, mut controller: WifiController<'static>) {
-        let config = Configuration::Mixed(self.sta_config.clone(), self.ap_config.clone());
-        match controller.set_configuration(&config) {
-            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
-            Err(_) => {
-                println!("WiFi Configuration Error");
-                println!("Error Config: {:?}", config);
-            }
-        }
+    pub async fn start_collection(&self) {
+        // let config = Configuration::Mixed(self.sta_config.clone(), self.ap_config.clone());
+        // match controller.set_configuration(&config) {
+        //     Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+        //     Err(_) => {
+        //         println!("WiFi Configuration Error");
+        //         println!("Error Config: {:?}", config);
+        //     }
+        // }
 
-        // In case controller isnt started already, start it
-        if !matches!(controller.is_started(), Ok(true)) {
-            controller.start_async().await.unwrap();
-            println!("Wifi started!");
-        }
+        // // In case controller isnt started already, start it
+        // if !matches!(controller.is_started(), Ok(true)) {
+        //     controller.start_async().await.unwrap();
+        //     println!("Wifi started!");
+        // }
 
-        // Signal Collection Start
-        START_COLLECTION_.signal(true);
-        // Share WiFi Controller to Global Context
-        CONTROLLER_CH.send(controller).await;
+        // // Signal Collection Start
+        // START_COLLECTION_.signal(true);
+        // // Share WiFi Controller to Global Context
+        // CONTROLLER_CH.send(controller).await;
+        start_collection(crate::ConnectionType::Mixed).await;
     }
 
     /// Stops Collection & Returns WiFi Controller Instance
-    pub async fn stop(&self) -> WifiController<'static> {
-        START_COLLECTION_.signal(false);
-        self.controller_rx.receive().await
+    pub fn stop_collection(&self) {
+        stop_collection();
+        // START_COLLECTION_.signal(false);
+        // self.controller_rx.receive().await
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
-        self.controller_rx.receive().await
+        // self.controller_rx.receive().await
+        recapture_controller().await
+    }
+
+    /// Retrieve the latest available CSI data packet
+    /// This method does not work if the Access Point is in Monitor Mode
+    pub async fn get_csi_data(&mut self) -> Result<CSIDataPacket> {
+        match self.op_mode {
+            ApOperationMode::Monitor => Err(crate::error::Error::SystemError(
+                "get_csi_data_raw() not supported in Monitor Mode",
+            )),
+            _ => match reconstruct_csi_from_udp().await {
+                Ok(csi_pkt) => Ok(csi_pkt),
+                Err(_e) => Err(crate::error::Error::SystemError(
+                    "Error reconstructing recieved CSI message",
+                )),
+            },
+        }
+    }
+
+    /// Retrieve the latest recieved CSI unprocessed raw data packet
+    /// This method does not work if the Access Point is in Monitor Mode
+    pub async fn get_csi_data_raw(&mut self) -> Result<Vec<u8, 619>> {
+        match self.op_mode {
+            ApOperationMode::Monitor => Err(crate::error::Error::SystemError(
+                "get_csi_data_raw() not supported in Monitor Mode",
+            )),
+            _ => {
+                // Wait for CSI data packet to update
+                let csi_raw_pkt = CSI_UDP_RAW_CH.receive().await;
+                Ok(csi_raw_pkt)
+            }
+        }
+    }
+
+    /// Print the latest CSI data with metadata to console
+    pub async fn print_csi_w_metadata(&mut self) {
+        // Wait for CSI data packet to update
+        let proc_csi_data = reconstruct_csi_from_udp().await.unwrap();
+
+        // Print the CSI data to console
+        proc_csi_data.print_csi_w_metadata();
     }
 }
 
-// #[embassy_executor::task]
-pub async fn run_dhcp_client(sta_stack: Stack<'static>) {
-    println!("Running DHCP Client");
+#[embassy_executor::task]
+pub async fn udp_network_ops(sta_stack: Stack<'static>) {
+    // Retrieve acquired IP information from DHCP
+    let ip_info = DHCP_CLIENT_INFO.wait().await;
 
-    // Acquire and store IP information for gateway and client after configuration is up
+    // ------------------ UDP Socket Setup ------------------
+    let mut udp_rx_buffer = [0; 1024];
+    let mut udp_tx_buffer = [0; 1024];
+    let mut udp_rx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
+    let mut udp_tx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
 
-    // Check if link is up
-    sta_stack.wait_link_up().await;
-    println!("Link is up!");
+    let mut socket = UdpSocket::new(
+        sta_stack,
+        &mut udp_rx_meta,
+        &mut udp_rx_buffer,
+        &mut udp_tx_meta,
+        &mut udp_tx_buffer,
+    );
 
-    // Create instance to store acquired IP information
-    let mut ip_info = IpInfo {
-        local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
-        gateway_address: Ipv4Address::UNSPECIFIED,
-    };
+    println!("Binding");
+    // Bind to specified source port
+    socket.bind(10789).unwrap();
+    // Endpoint to send back collected CSI data
+    let endpoint = IpEndpoint::new(embassy_net::IpAddress::Ipv4(ip_info.gateway_address), 10789);
 
-    println!("Acquiring config...");
-    sta_stack.wait_config_up().await;
-    println!("Config Acquired");
-
-    // Print out acquired IP configuration
     loop {
-        if let Some(config) = sta_stack.config_v4() {
-            ip_info.local_address = config.address;
-            ip_info.gateway_address = config.gateway.unwrap();
-
-            #[cfg(feature = "defmt")]
-            {
-                info!("Local IP: {:?}", ip_info.local_address);
-                info!("Gateway IP: {:?}", ip_info.gateway_address);
-            }
-
-            #[cfg(not(feature = "defmt"))]
-            {
-                println!("Local IP: {:?}", ip_info.local_address);
-                println!("Gateway IP: {:?}", ip_info.gateway_address);
-            }
-
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
+        Timer::after(Duration::from_millis(1)).await;
     }
-    // Signal that DHCP is complete
-    DHCP_CLIENT_INFO.signal(ip_info);
 }

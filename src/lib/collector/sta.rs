@@ -1,9 +1,7 @@
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::watch::Receiver;
 
-use esp_hal::config;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
@@ -15,31 +13,31 @@ use embassy_net::{
     IpEndpoint, Stack, StackResources,
 };
 
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 
 use enumset::enum_set;
 
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
-use esp_wifi::wifi::{self, WifiController};
-use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice, WifiEvent};
+use esp_wifi::wifi::WifiController;
+use esp_wifi::wifi::{ClientConfiguration, Interfaces, WifiDevice, WifiEvent};
 
-use crate::collector::run_dhcp_client;
 use crate::error::Result;
+use crate::run_dhcp_client;
 
 use heapless::Vec;
 
 use crate::{
-    build_csi_config, capture_csi_info, configure_connection, connect_wifi, get_sntp_time,
-    net_task, process_csi_packet, recapture_controller, run_ntp_sync, start_collection, start_wifi,
-    stop_collection, unix_to_date_time, ConnectionType,
+    build_csi_config, capture_csi_info, configure_connection, connect_wifi, net_task,
+    process_csi_packet, recapture_controller, run_ntp_sync, start_collection, start_wifi,
+    stop_collection, ConnectionType,
 };
 use crate::{sequence_sync_task, CSIConfig};
 
 use crate::{
-    CSIDataPacket, DateTimeCapture, CLIENT_CONFIG_CH, CONTROLLER_CH, CSI_CONFIG_CH, DATE_TIME,
-    DATE_TIME_VALID, DHCP_CLIENT_INFO, MAC_FIL_CH, PROC_CSI_DATA, SEQ_NUM_EN, START_COLLECTION_,
+    CSIDataPacket, CLIENT_CONFIG_CH, CONTROLLER_CH, CSI_CONFIG_CH, DHCP_CLIENT_INFO, MAC_FIL_CH,
+    PROC_CSI_DATA, SEQ_NUM_EN, START_COLLECTION_,
 };
 
 macro_rules! mk_static {
@@ -192,7 +190,6 @@ impl CSIStation {
         run_dhcp_client(sta_stack).await;
         // Run NTP Sync to synchronize time
         if self.sync_time {
-            println!("Running NTP Sync");
             run_ntp_sync(sta_stack).await;
         }
 

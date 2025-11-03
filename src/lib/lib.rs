@@ -1775,14 +1775,14 @@ async fn start_collection(conn_type: ConnectionType) {
     configure_connection(conn_type.clone()).await;
 
     // In case controller isnt started already, start it
-    let mut controller = CONTROLLER_CH.receive().await;
+    let controller = CONTROLLER_CH.receive().await;
     if !matches!(controller.is_started(), Ok(true)) {
         start_wifi().await;
     }
     CONTROLLER_CH.send(controller).await;
 
     // In case controller isnt connected, establish a connection
-    let mut controller = CONTROLLER_CH.receive().await;
+    let controller = CONTROLLER_CH.receive().await;
     if !matches!(controller.is_connected(), Ok(true)) {
         match conn_type {
             ConnectionType::AccessPoint => {
@@ -1798,4 +1798,196 @@ async fn start_collection(conn_type: ConnectionType) {
 
     // Signal Collection Start
     START_COLLECTION_.signal(true);
+}
+
+pub async fn run_dhcp_client(sta_stack: Stack<'static>) {
+    println!("Running DHCP Client");
+
+    // Acquire and store IP information for gateway and client after configuration is up
+
+    // Check if link is up
+    sta_stack.wait_link_up().await;
+    println!("Link is up!");
+
+    // Create instance to store acquired IP information
+    let mut ip_info = IpInfo {
+        local_address: Ipv4Cidr::new(Ipv4Addr::UNSPECIFIED, 24),
+        gateway_address: Ipv4Address::UNSPECIFIED,
+    };
+
+    println!("Acquiring config...");
+    sta_stack.wait_config_up().await;
+    println!("Config Acquired");
+
+    // Print out acquired IP configuration
+    loop {
+        if let Some(config) = sta_stack.config_v4() {
+            ip_info.local_address = config.address;
+            ip_info.gateway_address = config.gateway.unwrap();
+
+            #[cfg(feature = "defmt")]
+            {
+                info!("Local IP: {:?}", ip_info.local_address);
+                info!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            #[cfg(not(feature = "defmt"))]
+            {
+                println!("Local IP: {:?}", ip_info.local_address);
+                println!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+    // Signal that DHCP is complete
+    DHCP_CLIENT_INFO.signal(ip_info);
+}
+
+// #[embassy_executor::task]
+// async fn run_dhcp_server(stack: Stack<'static>, gw_ip_addr: &'static str) {
+//     use core::net::{Ipv4Addr, SocketAddrV4};
+
+//     use edge_dhcp::{
+//         io::{self, DEFAULT_SERVER_PORT},
+//         server::{Server, ServerOptions},
+//     };
+//     use edge_nal::UdpBind;
+//     use edge_nal_embassy::{Udp, UdpBuffers};
+
+//     let ip = Ipv4Addr::from_str(gw_ip_addr).expect("DHCP task failed to parse gateway ip");
+
+//     let mut buf = [0u8; 1500];
+
+//     let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
+
+//     let buffers = UdpBuffers::<3, 1024, 1024, 10>::new();
+//     let unbound_socket = Udp::new(stack, &buffers);
+//     let mut bound_socket = unbound_socket
+//         .bind(core::net::SocketAddr::V4(SocketAddrV4::new(
+//             Ipv4Addr::UNSPECIFIED,
+//             DEFAULT_SERVER_PORT,
+//         )))
+//         .await
+//         .unwrap();
+
+//     println!("DHCP Server Running");
+//     DHCP_COMPLETE.signal(());
+//     let mut server = Server::<_, 64>::new_with_et(ip);
+//     loop {
+//         _ = io::server::run(
+//             &mut server,
+//             &ServerOptions::new(ip, Some(&mut gw_buf)),
+//             &mut bound_socket,
+//             &mut buf,
+//         )
+//         .await
+//         .inspect_err(|_e| println!("DHCP Server Error"));
+//         println!("DHCP Buffer: {:?}", buf);
+//         Timer::after(Duration::from_millis(500)).await;
+//     }
+// }
+
+/// Reconstructs a `CSIDataPacket` from a UDP message buffer received in Monitor mode.
+///
+/// The expected format of `raw_csi_data` is:
+/// - Bytes 0-1: u16 sequence_number (big-endian)
+/// - Byte 2: u8 data_format (as repr of RxCSIFmt)
+/// - Bytes 3-6: u32 timestamp (big-endian)
+/// - Bytes 7..end: CSI data (u8 cast from original i8, up to 612 bytes)
+///
+/// Fields not transmitted (e.g., MAC, RSSI, rate, etc.) are set to default values:
+/// - u32/i32 fields: 0
+/// - mac: [0; 6]
+/// - date_time: None
+/// - sig_len: 0 (cannot be reliably reconstructed without additional data)
+/// - rx_state: 0 (assumes no error)
+///
+/// Returns an error if the buffer length is invalid (<7 bytes or CSI data >612 bytes).
+pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
+    // Retrive the new CSI raw data from UDP channel
+    let raw_csi_data = CSI_UDP_RAW_CH.receive().await;
+
+    if raw_csi_data.len() < 7 {
+        return Err(crate::error::Error::SystemError(
+            "Buffer too short: must be at least 7 bytes",
+        ));
+    }
+
+    let csi_data_start = 7;
+    let csi_len = (raw_csi_data.len() - csi_data_start) as u16;
+    if csi_len > 612 {
+        return Err(crate::error::Error::SystemError(
+            "CSI data too long: max 612 bytes",
+        ));
+    }
+
+    // Extract sequence_number (u16 Big Endian)
+    let sequence_number = u16::from_be_bytes([raw_csi_data[0], raw_csi_data[1]]);
+
+    // Extract data_format (u8 -> RxCSIFmt)
+    let fmt_u8 = raw_csi_data[2];
+    let (data_format, bandwidth, sig_mode, stbc, secondary_channel) = match fmt_u8 {
+        0 => (RxCSIFmt::Bw20, 0, 0, 0, 0),
+        1 => (RxCSIFmt::HtBw20, 0, 1, 0, 0),
+        2 => (RxCSIFmt::HtBw20Stbc, 0, 1, 1, 0),
+        3 => (RxCSIFmt::SecbBw20, 0, 0, 0, 2),
+        4 => (RxCSIFmt::SecbHtBw20, 0, 1, 0, 2),
+        5 => (RxCSIFmt::SecbHtBw20Stbc, 0, 1, 1, 2),
+        6 => (RxCSIFmt::SecbHtBw40, 1, 1, 0, 2),
+        7 => (RxCSIFmt::SecbHtBw40Stbc, 1, 1, 1, 2),
+        8 => (RxCSIFmt::SecaBw20, 0, 0, 0, 1),
+        9 => (RxCSIFmt::SecaHtBw20, 0, 1, 0, 1),
+        10 => (RxCSIFmt::SecaHtBw20Stbc, 0, 1, 1, 1),
+        11 => (RxCSIFmt::SecaHtBw40, 1, 1, 0, 1),
+        12 => (RxCSIFmt::SecaHtBw40Stbc, 1, 1, 1, 1),
+        _ => (RxCSIFmt::Undefined, 0, 0, 0, 0),
+    };
+
+    // Extract timestamp (u32 BE)
+    let timestamp = u32::from_be_bytes([
+        raw_csi_data[3],
+        raw_csi_data[4],
+        raw_csi_data[5],
+        raw_csi_data[6],
+    ]);
+
+    // Reconstruct CSI data (u8 -> i8, preserving sign via bit reinterpretation)
+    let mut csi_data = Vec::new();
+    for &b in &raw_csi_data[csi_data_start..] {
+        csi_data
+            .push(b as i8)
+            .map_err(|_| "Failed to push to Vec (capacity exceeded)")
+            .unwrap();
+    }
+
+    // Build CSIDataPacket with defaults for missing fields
+    Ok(CSIDataPacket {
+        mac: [0u8; 6],
+        rssi: 0,
+        timestamp,
+        rate: 0,
+        sgi: 0,
+        secondary_channel: secondary_channel,
+        channel: 0,
+        bandwidth: bandwidth,
+        antenna: 0,
+        sig_mode: sig_mode,
+        mcs: 0,
+        smoothing: 0,
+        not_sounding: 0,
+        aggregation: 0,
+        stbc: stbc,
+        fec_coding: 0,
+        ampdu_cnt: 0,
+        noise_floor: 0,
+        rx_state: 0,
+        sig_len: 0,
+        date_time: None,
+        sequence_number,
+        data_format,
+        csi_data_len: csi_len,
+        csi_data,
+    })
 }

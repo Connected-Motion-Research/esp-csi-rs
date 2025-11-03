@@ -1,15 +1,15 @@
-//! Example of Access Point Mode for CSI Collection
+//! Example of Access Point Monitor for CSI Collection
 //!
-//! This configuration allows other ESP devices configured in Access Point mode to allow Stations to connect to and collect CSI data.
+//! This configuration allows other ESP Trigger Stations to connect to stimulate CSI data locally.
+//! This configuration only monitors the traffic without actually collecting CSI data itself.
 //!
-//! At least two ESP devices (one Station and one Access Point) are needed to enable this configuration.
-//! More ESP stations connecting to the Access Point can also be added to form a star topology.
+//! At least two ESP devices (one Station Trigger and one Access Point Monitor) are needed to enable this configuration.
+//! More ESP Trigger stations connecting to the Access Point can also be added to form a star topology.
 //!
-//! IMPORTANT NOTE: APs collect CSI data as well.
 //!
 //! Connection Options:
-//! - Option 1: Allow one ESP configured as a Station to connect to the ESP Access Point.
-//! - Option 2: Allow multiple ESPs configured as a Station to connect to the ESP Access Point.
+//! - Option 1: Allow one ESP configured as a Station Trigger to connect to a single ESP Access Point Monitor.
+//! - Option 2: Allow multiple ESPs configured as a Station Triggers to connect to a single ESP Access Point Monitor.
 //!
 //! The `ap_ssid` and `ap_password` defined are the ones the ESP Station(s) needs to connect to the ESP  Access Point.
 //! `max_connections` defines the maximum number of ESP Stations that can connect to the ESP Access Point.
@@ -79,7 +79,7 @@ async fn main(spawner: Spawner) {
             ssid: "esp".try_into().unwrap(),
             password: "12345678".try_into().unwrap(),
             auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-            max_connections: 5,
+            max_connections: 1,
             ..Default::default()
         },
         // Specify Operation Mode
@@ -100,27 +100,27 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_secs(60)).await;
 
     // Stop & Recapture Controller for Next Collection Activity
-    let controller = csi_coll_ap.stop_collection().await;
+    csi_coll_ap.stop_collection().await;
     println!("Stopped AP");
 
-    // // Ex. Update AP Configuration
-    // println!("Updating Configuration");
-    // csi_coll_ap.update_config(AccessPointConfiguration::default());
+    // Ex. Update AP Configuration
+    println!("Updating Configuration");
+    csi_coll_ap.update_config(AccessPointConfiguration::default());
 
-    // // Wait some time before starting again
-    // println!("Starting Again in 3 seconds");
-    // Timer::after(Duration::from_secs(3)).await;
+    // Wait some time before starting again
+    println!("Starting Again in 3 seconds");
+    Timer::after(Duration::from_secs(3)).await;
 
-    // // Start AP again to enable collection at stations
-    // csi_coll_ap.start(controller).await;
-    // println!("Started AP Again");
+    // Start AP again to enable collection at stations
+    csi_coll_ap.start(controller).await;
+    println!("Started AP Again");
 
-    // // Run for 2 Seconds
-    // Timer::after(Duration::from_secs(2)).await;
+    // Run for 2 Seconds
+    Timer::after(Duration::from_secs(2)).await;
 
-    // // Stop Access Point
-    // let _ = csi_coll_ap.stop().await;
-    // println!("Stopped AP");
+    // Stop Access Point
+    let _ = csi_coll_ap.stop().await;
+    println!("Stopped AP");
 
     loop {
         Timer::after(Duration::from_secs(1)).await

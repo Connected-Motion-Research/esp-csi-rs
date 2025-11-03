@@ -1,12 +1,12 @@
-//! Example of Station Mode for CSI Collection
+//! Example of Station Mode Trigger for CSI Collection
 //!
-//! This configuration allows the collection of CSI data by connecting to a WiFi router or ESP Access Point.
+//! This configuration collects CSI data locally by generating traffic to a connected WiFi router or ESP Access Point.
 //!
 //! At least two devices are needed in this configuration.
 //!
 //! Connection Options:
 //! - Option 1: Connect to an existing commercial router
-//! - Option 2: Connect to another ESP programmed in AP Mode or AP/STA Mode
+//! - Option 2: Connect to another ESP operating as an AP Monitor or AP/STA Monitor
 //!
 //! The SSID and Password defined is for the Access Point or Router the ESP Station will be connecting to.
 
@@ -14,20 +14,17 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::Subscriber};
 use embassy_time::{with_timeout, Duration, Timer};
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
     collector::{CSIStation, StaOperationMode, StaTriggerConfig},
-    config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
-    CSICollector, NetworkArchitechture,
+    config::CSIConfig,
 };
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
 use esp_wifi::{init, wifi::ClientConfiguration, EspWifiController};
-use heapless::Vec;
 
 esp_app_desc!();
 
@@ -61,7 +58,7 @@ async fn main(spawner: Spawner) {
     let timer1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
-    let mut rng = Rng::new(peripherals.RNG);
+    let rng = Rng::new(peripherals.RNG);
 
     println!("Controller Init");
     // Initialize WiFi Controller
@@ -70,17 +67,14 @@ async fn main(spawner: Spawner) {
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
-    // Obtain a random seed value
-    let seed = rng.random() as u64;
-
     println!("WiFi Controller Initialized");
 
     // Create a CSI collector station configuration to establish/trigger traffic
     let mut csi_coll_sta = CSIStation::new(
         CSIConfig::default(),
         ClientConfiguration {
-            ssid: "esp".into(),
-            password: "12345678".into(),
+            ssid: "Connected Motion ".into(),
+            password: "automotion@123".into(),
             auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
             channel: Some(1),
             ..Default::default()
@@ -91,7 +85,7 @@ async fn main(spawner: Spawner) {
         // Useful when in monitor mode since sniffer function is active
         None,
         // Set to true only if there is an internet connection at AP
-        false,
+        true,
         controller,
     )
     .await;

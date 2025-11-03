@@ -73,7 +73,7 @@ async fn main(spawner: Spawner) {
 
     // Create a CSI collector configuration for an Access Point
     // Access Point defaults to Monitor mode
-    let mut csi_coll_ap = CSIAccessPoint::new_with_defaults();
+    let mut csi_coll_ap = CSIAccessPoint::new_with_defaults(controller).await;
 
     // Initalize CSI collector AP
     csi_coll_ap.init(interfaces, &spawner).await.unwrap();
