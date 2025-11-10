@@ -1,17 +1,17 @@
-//! Example of Access Point Mode for CSI Collection
+//! Example of Access Point Trigger for CSI Collection
 //!
-//! This configuration allows other ESP devices configured in Access Point mode to allow Stations to connect to and collect CSI data.
+//! This configuration generates trigger traffic to connected ESP Station Monitors to stimulate CSI data collection.
+//! CSI collected at the stations is sent back to this Access Point Trigger over UDP that is reconstructed as a `CSIDataPacket`.
 //!
-//! At least two ESP devices (one Station and one Access Point) are needed to enable this configuration.
-//! More ESP stations connecting to the Access Point can also be added to form a star topology.
-//!
-//! IMPORTANT NOTE: APs collect CSI data as well.
+//! At least two ESP devices (one Station Monitor and one Access Point Trigger) are needed to enable this configuration.
+//! More ESP monitor stations connecting to the Access Point can also be added to form a star topology.
+//! The trigger traffic can be either an ICMP Echo Request (Ping) broadcast or unicast.
 //!
 //! Connection Options:
-//! - Option 1: Allow one ESP configured as a Station to connect to the ESP Access Point.
-//! - Option 2: Allow multiple ESPs configured as a Station to connect to the ESP Access Point.
+//! - Option 1: Allow one ESP configured as a Station Monitor to connect to a single ESP Access Point Trigger.
+//! - Option 2: Allow multiple ESPs configured as a Station Monitors to connect to a single ESP Access Point Trigger.
 //!
-//! The `ap_ssid` and `ap_password` defined are the ones the ESP Station(s) needs to connect to the ESP  Access Point.
+//! The `ap_ssid` and `ap_password` defined are the ones the ESP Station(s) needs to connect to the ESP Access Point.
 //! `max_connections` defines the maximum number of ESP Stations that can connect to the ESP Access Point.
 //! The default value of `max_connections` is 1. If you want to connect more stations you will need to increase it.
 //!
@@ -76,12 +76,17 @@ async fn main(spawner: Spawner) {
     let mut csi_coll_ap = CSIAccessPoint::new(
         // Specify Any Access Point Configuration
         AccessPointConfiguration {
-            max_connections: 5,
+            ssid: "esp".try_into().unwrap(),
+            password: "12345678".try_into().unwrap(),
+            auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+            max_connections: 1,
             ..Default::default()
         },
         // Specify Operation Mode as Trigger with Default Trigger Configuration
         ApOperationMode::Trigger(ApTriggerConfig::default()),
-    );
+        controller,
+    )
+    .await;
 
     // Initalize CSI collector AP
     csi_coll_ap.init(interfaces, &spawner).await.unwrap();
@@ -89,11 +94,11 @@ async fn main(spawner: Spawner) {
     // Start AP to Enable CSI collection at stations
     // In trigger mode, the Access point sends trigger packets to stimulate CSI collection at connected stations.
     // The collected CSI is transferred back to the Access Point.
-    csi_coll_ap.start(controller).await;
+    csi_coll_ap.start_collection().await;
     println!("Started AP First Time");
 
     // Recieve Data Collected from Stations for 2 Seconds
-    with_timeout(Duration::from_secs(2), async {
+    with_timeout(Duration::from_secs(60), async {
         loop {
             csi_coll_ap.print_csi_w_metadata().await;
         }
@@ -102,7 +107,7 @@ async fn main(spawner: Spawner) {
     .unwrap_err();
 
     // Stop Collection
-    let _ = csi_coll_ap.stop().await;
+    csi_coll_ap.stop_collection().await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await

@@ -47,7 +47,7 @@ async fn main(spawner: Spawner) {
     let timer1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
-    let mut rng = Rng::new(peripherals.RNG);
+    let rng = Rng::new(peripherals.RNG);
 
     // Initialize WiFi Controller
     let init = &*mk_static!(EspWifiController<'static>, init(timer, rng).unwrap());
@@ -59,13 +59,13 @@ async fn main(spawner: Spawner) {
 
     // Create a Sniffer CSI Collector
     // Don't filter any MAC addresses out
-    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None, controller);
+    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None, controller).await;
 
     // Initialize CSI Collector
     csi_coll_snif.init(interfaces, &spawner).await.unwrap();
 
     // Start Collection
-    csi_coll_snif.start(controller).await;
+    csi_coll_snif.start_collection().await;
 
     // Collect for 2 Seconds
     with_timeout(Duration::from_secs(2), async {
@@ -77,15 +77,14 @@ async fn main(spawner: Spawner) {
     .unwrap_err();
 
     // Stop Collection
-    // Also Recapture Controller to start another collection
-    let controller = csi_coll_snif.stop().await;
+    csi_coll_snif.stop_collection().await;
 
-    println!("Starting Again in 3 seconds");
-    Timer::after(Duration::from_secs(3)).await;
+    println!("Starting Again in 5 seconds");
+    Timer::after(Duration::from_secs(5)).await;
     println!("Restarting Collection");
 
     // Start Collection
-    csi_coll_snif.start(controller).await;
+    csi_coll_snif.start_collection().await;
 
     // Collect for 2 Seconds
     with_timeout(Duration::from_secs(2), async {
@@ -97,8 +96,7 @@ async fn main(spawner: Spawner) {
     .unwrap_err();
 
     // Stop Collection
-    // No need to capture controller
-    let _ = csi_coll_snif.stop().await;
+    csi_coll_snif.stop_collection().await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await

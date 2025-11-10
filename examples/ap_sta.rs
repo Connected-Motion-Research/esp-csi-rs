@@ -72,7 +72,7 @@ async fn main(spawner: Spawner) {
     let timer1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
     let wifi = peripherals.WIFI;
     let timer = timer1.timer0;
-    let mut rng = Rng::new(peripherals.RNG);
+    let rng = Rng::new(peripherals.RNG);
 
     // Initialize WiFi Controller
     let init = &*mk_static!(EspWifiController<'static>, init(timer, rng).unwrap());
@@ -86,7 +86,7 @@ async fn main(spawner: Spawner) {
     // Device configured as a Access Point
     // Traffic is not enabled, so configuration is ignored. Connected stations are expected to generate traffic.
     // Network Architechture is AccessPoint-Station (NTP time collection not possible)
-    let mut csi_coll_ap = CSIAccessPointStation::new(
+    let csi_coll_ap = CSIAccessPointStation::new(
         // Specify Any Access Point Configuration
         AccessPointConfiguration {
             ssid: "esp".try_into().unwrap(),
@@ -97,8 +97,8 @@ async fn main(spawner: Spawner) {
             ..Default::default()
         },
         ClientConfiguration {
-            ssid: "Connected Motion ".into(),
-            password: "automotion@123".into(),
+            ssid: "SSID".into(),
+            password: "PASSWORD".into(),
             ..Default::default()
         },
         // Specify Operation Mode
@@ -118,7 +118,7 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_secs(60)).await;
 
     // Stop Collection & Recapture Controller for Next Collection
-    csi_coll_ap.stop_collection();
+    csi_coll_ap.stop_collection().await;
     println!("Stopped AP");
 
     loop {

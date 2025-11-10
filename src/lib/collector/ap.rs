@@ -19,7 +19,7 @@ use core::{net::Ipv4Addr, str::FromStr};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_println::println;
-use esp_wifi::wifi::{AccessPointConfiguration, Interfaces};
+use esp_wifi::wifi::{AccessPointConfiguration, Configuration, Interfaces};
 use esp_wifi::wifi::{WifiController, WifiDevice, WifiEvent};
 
 use crate::error::Result;
@@ -29,10 +29,10 @@ use enumset::enum_set;
 use crate::{
     configure_connection, net_task, recapture_controller, reconstruct_csi_from_udp,
     run_dhcp_server, start_collection, start_wifi, stop_collection, ConnectionType,
-    ACCESSPOINT_CONFIG_CH,
+    CONTROLLER_HALTED_SIGNAL,
 };
 
-use crate::{CSIDataPacket, CONTROLLER_CH, CSI_UDP_RAW_CH, DHCP_COMPLETE, START_COLLECTION_};
+use crate::{CSIDataPacket, CONTROLLER_CH, CSI_UDP_RAW_CH, START_COLLECTION};
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -87,7 +87,7 @@ enum TriggerType {
 /// Driver Struct to Enable CSI collection as an Access Point
 pub struct CSIAccessPoint {
     /// Access Point Configuration
-    // pub ap_config: AccessPointConfiguration,
+    pub ap_config: AccessPointConfiguration,
     /// Operation Mode: Trigger or Monitor
     pub op_mode: ApOperationMode,
     // controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
@@ -105,8 +105,8 @@ impl CSIAccessPoint {
     ) -> Self {
         // Send shared data to global context
         CONTROLLER_CH.send(wifi_controller).await;
-        ACCESSPOINT_CONFIG_CH.send(ap_config.clone()).await;
-        Self { op_mode }
+        // ACCESSPOINT_CONFIG_CH.send(ap_config.clone()).await;
+        Self { op_mode, ap_config }
     }
 
     /// Creates a new `CSIAccessPoint` instance with defaults.
@@ -114,11 +114,12 @@ impl CSIAccessPoint {
     /// 'ApOperationMode' is set to Monitor
     pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
         CONTROLLER_CH.send(wifi_controller).await;
-        ACCESSPOINT_CONFIG_CH
-            .send(AccessPointConfiguration::default())
-            .await;
+        // ACCESSPOINT_CONFIG_CH
+        //     .send(AccessPointConfiguration::default())
+        //     .await;
         Self {
             op_mode: ApOperationMode::Monitor,
+            ap_config: AccessPointConfiguration::default(),
         }
     }
 
@@ -141,11 +142,15 @@ impl CSIAccessPoint {
         let seed = 123456_u64;
         let ap_interface = interface.ap;
 
+        // Print Device MAC address
+        let bssid = ap_interface.mac_address();
+        esp_println::println!("AP BSSID: {:02X?}", bssid);
+
         // Create AP Network Stack
         let (ap_stack, ap_runner) = embassy_net::new(
             ap_interface,
             ap_ip_config,
-            mk_static!(StackResources<3>, StackResources::<3>::new()),
+            mk_static!(StackResources<6>, StackResources::<6>::new()),
             seed,
         );
 
@@ -154,7 +159,8 @@ impl CSIAccessPoint {
         println!("Network Task Running");
 
         // Configure WiFi Client/Station Connection
-        configure_connection(ConnectionType::AccessPoint).await;
+        let config = Configuration::AccessPoint(self.ap_config.clone());
+        configure_connection(ConnectionType::AccessPoint, config).await;
 
         // Start & Connect WiFi
         // This needs to be done before DHCP and NTP
@@ -164,9 +170,6 @@ impl CSIAccessPoint {
             .spawn(run_dhcp_server(ap_stack, gw_ip_addr_str))
             .ok();
         spawner.spawn(ap_connection()).ok();
-
-        // Wait for DHCP to complete
-        DHCP_COMPLETE.wait().await;
 
         match self.op_mode {
             ApOperationMode::Trigger(config) => {
@@ -184,38 +187,24 @@ impl CSIAccessPoint {
     /// Starts the Access Point & Loads Configuration
     /// To reconfigure AP settings, no need to reinit, only call start again with the updated configuration.
     pub async fn start_collection(&self) {
-        start_collection(crate::ConnectionType::AccessPoint).await;
+        let config = Configuration::AccessPoint(self.ap_config.clone());
+        start_collection(crate::ConnectionType::AccessPoint, config).await;
     }
 
-    // pub async fn start(&self, mut controller: WifiController<'static>) {
-    //     if !matches!(controller.is_started(), Ok(true)) {
-    //         let config = Configuration::AccessPoint(self.ap_config.clone());
-    //         match controller.set_configuration(&config) {
-    //             Ok(_) => println!("WiFi Configuration Set: {:?}", config),
-    //             Err(e) => {
-    //                 println!("{:?}", e);
-    //                 println!("Error Config: {:?}", config);
-    //             }
-    //         }
-    //         println!("Starting wifi");
-    //         controller.start_async().await.unwrap();
-    //         println!("Wifi started!");
-    //     }
-
-    //     // Signal Collection Start
-    //     START_COLLECTION_.signal(true);
-    //     // Share WiFi Controller to Global Context
-    //     CONTROLLER_CH.send(controller).await;
-    // }
-
     /// Stops Collection
-    pub fn stop_collection(&self) {
-        stop_collection();
+    pub async fn stop_collection(&self) {
+        stop_collection().await;
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
         recapture_controller().await
+    }
+
+    /// Update Access Point Configuration
+    pub async fn update_ap_config(&mut self, ap_config: AccessPointConfiguration) {
+        // update_ap_config(ap_config).await;
+        self.ap_config = ap_config;
     }
 
     /// Retrieve the latest available CSI data packet
@@ -269,7 +258,7 @@ pub async fn ap_connection() {
     // Connection Loop
     loop {
         // Wait for collection signal to start
-        while !START_COLLECTION_.wait().await {
+        while !START_COLLECTION.wait().await {
             Timer::after(Duration::from_millis(100)).await;
         }
         let mut controller = controller_rx.receive().await;
@@ -278,7 +267,7 @@ pub async fn ap_connection() {
             // Events Future
             let wait_event_fut = controller.wait_for_events(ap_events, true);
             // Stop Collection Future
-            let stop_coll_fut = START_COLLECTION_.wait();
+            let stop_coll_fut = START_COLLECTION.wait();
 
             // If either future completes, handle accordingly
             match select(wait_event_fut, stop_coll_fut).await {
@@ -295,9 +284,10 @@ pub async fn ap_connection() {
                 // Stop collection future case
                 // Return Controller and break inner loop
                 Either::Second(_sig) => {
-                    // println!("AP Connection task stopping...");
+                    println!("Halting CSI Collection...");
                     // Send the controller back before we exit the inner loop
                     CONTROLLER_CH.send(controller).await;
+                    CONTROLLER_HALTED_SIGNAL.signal(true);
                     break; // Break inner loop, and go wait again for start and new controller
                 }
             }
@@ -329,64 +319,68 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
     // Buffer to hold ICMP Packet
     let mut icmp_buffer = [0u8; 12];
 
-    // Create ICMP Packet
-    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
-
-    // Create an ICMPv4 Echo Request
-    let icmp_repr = Icmpv4Repr::EchoRequest {
-        ident: 0x22b,
-        seq_no: config.trigger_seq_num,
-        data: &[0xDE, 0xAD, 0xBE, 0xEF],
-    };
-
-    // Serialize the ICMP representation into the packet
-    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
-
-    // Buffer for the full IPv4 packet
-    let mut tx_ipv4_buffer = [0u8; 64];
-
-    // Access Point IP Information
-    let gw_ip_addr_str = "192.168.2.1";
-    let gw_ip_addr = Ipv4Addr::from_str(gw_ip_addr_str).expect("failed to parse gateway ip");
-
-    // Destination IP Information
-    let dest_ip_addr = match config.trigger_type {
-        TriggerType::Broadcast => {
-            Ipv4Addr::from_str("192.168.2.255").expect("failed to parse destination ip")
-        }
-        TriggerType::Unicast(ip_str) => {
-            // Parse IP Address
-            Ipv4Addr::from_str(ip_str).expect("failed to parse destination ip")
-        }
-    };
-
-    // Define the IPv4 representation
-    let ipv4_repr = Ipv4Repr {
-        src_addr: gw_ip_addr,
-        dst_addr: dest_ip_addr,
-        payload_len: icmp_repr.buffer_len(),
-        hop_limit: 64, // Time-to-live value
-        next_header: IpProtocol::Icmp,
-    };
-
-    // Create the IPv4 packet
-    let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
-
-    // Serialize the IPv4 representation into the packet
-    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
-
-    // Copy the ICMP packet into the IPv4 packet's payload
-    ipv4_packet
-        .payload_mut()
-        .copy_from_slice(icmp_packet.into_inner());
-
-    // IP Packet buffer that will be sent or recieved
-    let ipv4_packet_buffer = ipv4_packet.into_inner();
-
+    let mut seq_num = config.trigger_seq_num;
     // Start sending trigger packets
     loop {
+        // Create ICMP Packet
+        let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+
+        // Create an ICMPv4 Echo Request
+        let icmp_repr = Icmpv4Repr::EchoRequest {
+            ident: 0x22b,
+            seq_no: seq_num,
+            data: &[0xDE, 0xAD, 0xBE, 0xEF],
+        };
+
+        // Serialize the ICMP representation into the packet
+        icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+
+        // Buffer for the full IPv4 packet
+        let mut tx_ipv4_buffer = [0u8; 64];
+
+        // Access Point IP Information
+        let gw_ip_addr_str = "192.168.2.1";
+        let gw_ip_addr = Ipv4Addr::from_str(gw_ip_addr_str).expect("failed to parse gateway ip");
+
+        // Destination IP Information
+        let dest_ip_addr = match config.trigger_type {
+            TriggerType::Broadcast => {
+                Ipv4Addr::from_str("192.168.2.255").expect("failed to parse destination ip")
+            }
+            TriggerType::Unicast(ip_str) => {
+                // Parse IP Address
+                Ipv4Addr::from_str(ip_str).expect("failed to parse destination ip")
+            }
+        };
+
+        // Define the IPv4 representation
+        let ipv4_repr = Ipv4Repr {
+            src_addr: gw_ip_addr,
+            dst_addr: dest_ip_addr,
+            payload_len: icmp_repr.buffer_len(),
+            hop_limit: 64, // Time-to-live value
+            next_header: IpProtocol::Icmp,
+        };
+
+        // Create the IPv4 packet
+        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
+
+        // Serialize the IPv4 representation into the packet
+        ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+
+        // Copy the ICMP packet into the IPv4 packet's payload
+        ipv4_packet
+            .payload_mut()
+            .copy_from_slice(icmp_packet.into_inner());
+
+        // IP Packet buffer that will be sent or recieved
+        let ipv4_packet_buffer = ipv4_packet.into_inner();
+
         // Send raw packet
         raw_socket.send(ipv4_packet_buffer).await;
+
+        // Increment sequence number for next packet
+        seq_num = seq_num.wrapping_add(1);
 
         // Wait for user specified duration
         Timer::after(trigger_interval).await;
@@ -417,13 +411,34 @@ pub async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) 
     socket.bind(config.local_port).unwrap();
 
     // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
-    let mut message_u8: Vec<u8, 619> = Vec::new();
+    // Expected size is 619 but allocating a larger buffer to be safe
+    let mut rx_buf = [0u8; 1024];
 
     loop {
-        socket.recv_from(&mut message_u8).await.unwrap();
-        // Send the recieved raw CSI data to the global channel for processing
-        CSI_UDP_RAW_CH.send(message_u8.clone()).await;
-        // Clear the message buffer for next recieve
-        message_u8.clear();
+        // Receive data into the fixed-size array
+        match socket.recv_from(&mut rx_buf).await {
+            Ok((len, _endpoint)) => {
+                if len > 0 {
+                    // Copy the received data
+                    let data_slice = &rx_buf[..len];
+
+                    match Vec::<u8, 619>::from_slice(data_slice) {
+                        Ok(message_u8) => {
+                            // Send the received raw CSI data to the global channel
+                            CSI_UDP_RAW_CH.send(message_u8).await;
+                        }
+                        Err(_) => {
+                            println!(
+                                "Error: Received UDP packet larger than 619 bytes. Len: {}",
+                                len
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("UDP recv_from error: {:?}", e);
+            }
+        }
     }
 }

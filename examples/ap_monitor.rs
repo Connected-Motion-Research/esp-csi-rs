@@ -97,7 +97,7 @@ async fn main(spawner: Spawner) {
     println!("Started AP First Time");
 
     // Run for 2 Seconds
-    Timer::after(Duration::from_secs(60)).await;
+    Timer::after(Duration::from_secs(3)).await;
 
     // Stop & Recapture Controller for Next Collection Activity
     csi_coll_ap.stop_collection().await;
@@ -105,21 +105,23 @@ async fn main(spawner: Spawner) {
 
     // Ex. Update AP Configuration
     println!("Updating Configuration");
-    csi_coll_ap.update_config(AccessPointConfiguration::default());
+    csi_coll_ap
+        .update_ap_config(AccessPointConfiguration::default())
+        .await;
 
     // Wait some time before starting again
     println!("Starting Again in 3 seconds");
     Timer::after(Duration::from_secs(3)).await;
 
     // Start AP again to enable collection at stations
-    csi_coll_ap.start(controller).await;
+    csi_coll_ap.start_collection().await;
     println!("Started AP Again");
 
-    // Run for 2 Seconds
-    Timer::after(Duration::from_secs(2)).await;
+    // Run for 10 Seconds
+    Timer::after(Duration::from_secs(10)).await;
 
     // Stop Access Point
-    let _ = csi_coll_ap.stop().await;
+    csi_coll_ap.stop_collection().await;
     println!("Stopped AP");
 
     loop {

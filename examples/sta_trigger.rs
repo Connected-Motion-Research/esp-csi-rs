@@ -73,8 +73,8 @@ async fn main(spawner: Spawner) {
     let mut csi_coll_sta = CSIStation::new(
         CSIConfig::default(),
         ClientConfiguration {
-            ssid: "Connected Motion ".into(),
-            password: "automotion@123".into(),
+            ssid: "esp".into(),
+            password: "12345678".into(),
             auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
             channel: Some(1),
             ..Default::default()
@@ -84,8 +84,8 @@ async fn main(spawner: Spawner) {
         // Don't filter any MAC addresses
         // Useful when in monitor mode since sniffer function is active
         None,
-        // Set to true only if there is an internet connection at AP
-        true,
+        // Set to true only if there is an internet connection at AP (commercial router or AP+STA with internet)
+        false,
         controller,
     )
     .await;
