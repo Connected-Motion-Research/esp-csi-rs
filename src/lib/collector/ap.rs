@@ -68,7 +68,7 @@ pub struct ApTriggerConfig {
 impl Default for ApTriggerConfig {
     fn default() -> Self {
         Self {
-            trigger_freq_hz: 10,
+            trigger_freq_hz: 1,
             local_port: 10789,
             trigger_type: TriggerType::Broadcast,
             trigger_seq_num: 0,
@@ -252,13 +252,17 @@ impl CSIAccessPoint {
 pub async fn ap_connection() {
     // Capture Controller
     let controller_rx = CONTROLLER_CH.receiver();
+    let mut start_collection_watch = match START_COLLECTION.receiver() {
+        Some(r) => r,
+        None => panic!("Maximum number of recievers reached"),
+    };
     // Define Events to Listen For
     let ap_events =
         enum_set!(WifiEvent::ApStaconnected | WifiEvent::ApStadisconnected | WifiEvent::ApStop);
     // Connection Loop
     loop {
         // Wait for collection signal to start
-        while !START_COLLECTION.wait().await {
+        while !start_collection_watch.changed().await {
             Timer::after(Duration::from_millis(100)).await;
         }
         let mut controller = controller_rx.receive().await;
@@ -267,7 +271,7 @@ pub async fn ap_connection() {
             // Events Future
             let wait_event_fut = controller.wait_for_events(ap_events, true);
             // Stop Collection Future
-            let stop_coll_fut = START_COLLECTION.wait();
+            let stop_coll_fut = start_collection_watch.changed();
 
             // If either future completes, handle accordingly
             match select(wait_event_fut, stop_coll_fut).await {
@@ -298,6 +302,10 @@ pub async fn ap_connection() {
 // This task manages network operations for Access Point in Trigger mode
 #[embassy_executor::task]
 pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
+    let mut start_collection_watch = match START_COLLECTION.receiver() {
+        Some(r) => r,
+        None => panic!("Maximum number of recievers reached"),
+    };
     // Trigger Mode triggers CSI collection by sending ICMP packets at defined frequency
     // ------------------ ICMP Socket Setup ------------------
     let mut rx_buffer = [0; 64];
@@ -314,76 +322,101 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
         &mut tx_meta,
         &mut tx_buffer,
     );
-    // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
-    let trigger_interval = Duration::from_millis((1000 / config.trigger_freq_hz).into());
-    // Buffer to hold ICMP Packet
-    let mut icmp_buffer = [0u8; 12];
 
-    let mut seq_num = config.trigger_seq_num;
-    // Start sending trigger packets
     loop {
-        // Create ICMP Packet
-        let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+        while !start_collection_watch.changed().await {
+            Timer::after(Duration::from_millis(100)).await;
+        }
+        println!("ICMP Trigger Task: Collection Started");
 
-        // Create an ICMPv4 Echo Request
-        let icmp_repr = Icmpv4Repr::EchoRequest {
-            ident: 0x22b,
-            seq_no: seq_num,
-            data: &[0xDE, 0xAD, 0xBE, 0xEF],
-        };
+        // Station Trigger supports sending ICMP Echo Requests as trigger packets at defined frequency
+        let trigger_interval = Duration::from_millis((1000 / config.trigger_freq_hz).into());
+        // Buffer to hold ICMP Packet
+        let mut icmp_buffer = [0u8; 12];
 
-        // Serialize the ICMP representation into the packet
-        icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+        // Get Sequence Number
+        let mut seq_num = config.trigger_seq_num;
 
-        // Buffer for the full IPv4 packet
-        let mut tx_ipv4_buffer = [0u8; 64];
+        // Start sending trigger packets
+        loop {
+            // Trigger Interval Future
+            let trigger_timer_fut = Timer::after(trigger_interval);
+            // Stop Trigger Future
+            let stop_coll_fut = start_collection_watch.changed();
 
-        // Access Point IP Information
-        let gw_ip_addr_str = "192.168.2.1";
-        let gw_ip_addr = Ipv4Addr::from_str(gw_ip_addr_str).expect("failed to parse gateway ip");
+            match select(trigger_timer_fut, stop_coll_fut).await {
+                Either::First(_) => {
+                    // Create ICMP Packet
+                    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
 
-        // Destination IP Information
-        let dest_ip_addr = match config.trigger_type {
-            TriggerType::Broadcast => {
-                Ipv4Addr::from_str("192.168.2.255").expect("failed to parse destination ip")
+                    // Create an ICMPv4 Echo Request
+                    let icmp_repr = Icmpv4Repr::EchoRequest {
+                        ident: 0x22b,
+                        seq_no: seq_num,
+                        data: &[0xDE, 0xAD, 0xBE, 0xEF],
+                    };
+
+                    // Serialize the ICMP representation into the packet
+                    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+
+                    // Buffer for the full IPv4 packet
+                    let mut tx_ipv4_buffer = [0u8; 64];
+
+                    // Access Point IP Information
+                    let gw_ip_addr_str = "192.168.2.1";
+                    let gw_ip_addr =
+                        Ipv4Addr::from_str(gw_ip_addr_str).expect("failed to parse gateway ip");
+
+                    // Destination IP Information
+                    let dest_ip_addr = match config.trigger_type {
+                        TriggerType::Broadcast => Ipv4Addr::from_str("192.168.2.255")
+                            .expect("failed to parse destination ip"),
+                        TriggerType::Unicast(ip_str) => {
+                            // Parse IP Address
+                            Ipv4Addr::from_str(ip_str).expect("failed to parse destination ip")
+                        }
+                    };
+
+                    // Define the IPv4 representation
+                    let ipv4_repr = Ipv4Repr {
+                        src_addr: gw_ip_addr,
+                        dst_addr: dest_ip_addr,
+                        payload_len: icmp_repr.buffer_len(),
+                        hop_limit: 64, // Time-to-live value
+                        next_header: IpProtocol::Icmp,
+                    };
+
+                    // Create the IPv4 packet
+                    let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
+
+                    // Serialize the IPv4 representation into the packet
+                    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+
+                    // Copy the ICMP packet into the IPv4 packet's payload
+                    ipv4_packet
+                        .payload_mut()
+                        .copy_from_slice(icmp_packet.into_inner());
+
+                    // IP Packet buffer that will be sent or recieved
+                    let ipv4_packet_buffer = ipv4_packet.into_inner();
+
+                    // Send raw packet
+                    raw_socket.send(ipv4_packet_buffer).await;
+
+                    // Increment sequence number for next packet
+                    seq_num = seq_num.wrapping_add(1);
+
+                    // Wait for user specified duration
+                    Timer::after(trigger_interval).await;
+                }
+                Either::Second(sig) => {
+                    if !sig {
+                        println!("Halting Triggers to Connected Stations");
+                        break;
+                    }
+                }
             }
-            TriggerType::Unicast(ip_str) => {
-                // Parse IP Address
-                Ipv4Addr::from_str(ip_str).expect("failed to parse destination ip")
-            }
-        };
-
-        // Define the IPv4 representation
-        let ipv4_repr = Ipv4Repr {
-            src_addr: gw_ip_addr,
-            dst_addr: dest_ip_addr,
-            payload_len: icmp_repr.buffer_len(),
-            hop_limit: 64, // Time-to-live value
-            next_header: IpProtocol::Icmp,
-        };
-
-        // Create the IPv4 packet
-        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut tx_ipv4_buffer);
-
-        // Serialize the IPv4 representation into the packet
-        ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
-
-        // Copy the ICMP packet into the IPv4 packet's payload
-        ipv4_packet
-            .payload_mut()
-            .copy_from_slice(icmp_packet.into_inner());
-
-        // IP Packet buffer that will be sent or recieved
-        let ipv4_packet_buffer = ipv4_packet.into_inner();
-
-        // Send raw packet
-        raw_socket.send(ipv4_packet_buffer).await;
-
-        // Increment sequence number for next packet
-        seq_num = seq_num.wrapping_add(1);
-
-        // Wait for user specified duration
-        Timer::after(trigger_interval).await;
+        }
     }
 }
 

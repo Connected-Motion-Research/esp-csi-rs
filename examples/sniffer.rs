@@ -98,6 +98,8 @@ async fn main(spawner: Spawner) {
     // Stop Collection
     csi_coll_snif.stop_collection().await;
 
+    println!("Collection Ended");
+
     loop {
         Timer::after(Duration::from_secs(1)).await
     }

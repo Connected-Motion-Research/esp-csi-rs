@@ -10,6 +10,8 @@ use esp_wifi::wifi::WifiController;
 
 use crate::error::Result;
 
+use embassy_time::{Duration, Timer};
+
 use crate::recapture_controller;
 use crate::CSIConfig;
 use crate::{build_csi_config, capture_csi_info, process_csi_packet, stop_collection};
@@ -71,11 +73,11 @@ impl CSISniffer {
 
     /// Starts CSI Collection
     pub async fn start_collection(&self) {
-        // Resend configuration and MAC filter
-        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
-        MAC_FIL_CH.send(self.mac_filter).await;
+        // Resend configuration
+        let config = self.csi_config.clone();
+        CSI_CONFIG_CH.send(config).await;
         // Signal start collection
-        START_COLLECTION.signal(true);
+        START_COLLECTION.sender().send(true);
     }
 
     /// Stops Collection
@@ -116,24 +118,30 @@ impl CSISniffer {
 
 #[embassy_executor::task]
 async fn sniffer_task() {
+    let mut start_collection_watch = match START_COLLECTION.receiver() {
+        Some(r) => r,
+        None => panic!("Maximum number of recievers reached"),
+    };
     loop {
         // Wait for Start Signal
-        START_COLLECTION.wait().await;
+        while !start_collection_watch.changed().await {
+            // If Start Collection is false, keep waiting
+            Timer::after(Duration::from_millis(100)).await;
+        }
         let mut controller = CONTROLLER_CH.receive().await;
         loop {
             // Retrieved Updated Configuration
-            let mac_filter = MAC_FIL_CH.receive().await;
             let csi_config = CSI_CONFIG_CH.receive().await;
             // Build CSI Configuration
             let csi_cfg = build_csi_config(csi_config.clone());
             println!("Starting CSI Collection");
             controller
                 .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                    capture_csi_info(info, mac_filter);
+                    capture_csi_info(info);
                 })
                 .unwrap();
             // If Start Collection becomes false then collection needs to stop
-            let stop_collection = START_COLLECTION.wait().await;
+            let stop_collection = start_collection_watch.changed().await;
             if !stop_collection {
                 println!("Halting CSI Collection");
                 CONTROLLER_CH.send(controller).await;
