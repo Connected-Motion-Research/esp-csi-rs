@@ -114,9 +114,6 @@ impl CSIAccessPoint {
     /// 'ApOperationMode' is set to Monitor
     pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
         CONTROLLER_CH.send(wifi_controller).await;
-        // ACCESSPOINT_CONFIG_CH
-        //     .send(AccessPointConfiguration::default())
-        //     .await;
         Self {
             op_mode: ApOperationMode::Monitor,
             ap_config: AccessPointConfiguration::default(),
@@ -225,7 +222,7 @@ impl CSIAccessPoint {
 
     /// Retrieve the latest recieved CSI unprocessed raw data packet
     /// This method does not work if the Access Point is in Monitor Mode
-    pub async fn get_csi_data_raw(&mut self) -> Result<Vec<u8, 619>> {
+    pub async fn get_csi_data_raw(&mut self) -> Result<Vec<u8, 625>> {
         match self.op_mode {
             ApOperationMode::Monitor => Err(crate::error::Error::SystemError(
                 "get_csi_data_raw() not supported in Monitor Mode",
@@ -307,7 +304,6 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
         None => panic!("Maximum number of recievers reached"),
     };
     // Trigger Mode triggers CSI collection by sending ICMP packets at defined frequency
-    // ------------------ ICMP Socket Setup ------------------
     let mut rx_buffer = [0; 64];
     let mut tx_buffer = [0; 64];
     let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
@@ -425,7 +421,6 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
 pub async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) {
     // Flow in trigger mode to recieve and process incoming UDP packets that contain CSI data
 
-    // ------------------ UDP Socket Setup ------------------
     let mut udp_rx_buffer = [0; 1024];
     let mut udp_tx_buffer = [0; 1024];
     let mut udp_rx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
@@ -443,8 +438,8 @@ pub async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) 
     // Bind to specified local port
     socket.bind(config.local_port).unwrap();
 
-    // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
-    // Expected size is 619 but allocating a larger buffer to be safe
+    // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
+    // Expected size is 625 but allocating a larger buffer to be safe
     let mut rx_buf = [0u8; 1024];
 
     loop {
@@ -455,14 +450,14 @@ pub async fn ap_udp_receiver(ap_stack: Stack<'static>, config: ApTriggerConfig) 
                     // Copy the received data
                     let data_slice = &rx_buf[..len];
 
-                    match Vec::<u8, 619>::from_slice(data_slice) {
+                    match Vec::<u8, 625>::from_slice(data_slice) {
                         Ok(message_u8) => {
                             // Send the received raw CSI data to the global channel
                             CSI_UDP_RAW_CH.send(message_u8).await;
                         }
                         Err(_) => {
                             println!(
-                                "Error: Received UDP packet larger than 619 bytes. Len: {}",
+                                "Error: Received UDP packet larger than 625 bytes. Len: {}",
                                 len
                             );
                         }

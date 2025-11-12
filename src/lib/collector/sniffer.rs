@@ -17,8 +17,8 @@ use crate::CSIConfig;
 use crate::{build_csi_config, capture_csi_info, process_csi_packet, stop_collection};
 
 use crate::{
-    CSIDataPacket, CONTROLLER_CH, CONTROLLER_HALTED_SIGNAL, CSI_CONFIG_CH, MAC_FIL_CH,
-    PROC_CSI_DATA, START_COLLECTION,
+    CSIDataPacket, CONTROLLER_CH, CONTROLLER_HALTED_SIGNAL, CSI_CONFIG_CH, PROC_CSI_DATA,
+    START_COLLECTION,
 };
 
 /// Driver Struct to Collect CSI as a Sniffer

@@ -224,6 +224,7 @@ impl CSIStation {
     /// To reconfigure Station settings, no need to reinit, only call start again with the updated configuration.
     pub async fn start_collection(&self) {
         let config = Configuration::Client(self.sta_config.clone());
+        CSI_CONFIG_CH.send(self.csi_config.clone()).await;
         start_collection(crate::ConnectionType::Client, config).await;
     }
 
@@ -261,7 +262,6 @@ impl CSIStation {
     }
 
     /// Print the latest CSI data with metadata to console
-    /// Optionally pass current time instant to calculate DateTimeCapture if available
     pub async fn print_csi_w_metadata(&mut self) {
         // Wait for CSI data packet to update
         let proc_csi_data = self.csi_data_rx.changed().await;
@@ -271,7 +271,6 @@ impl CSIStation {
     }
 }
 
-// This task manages the connection and establisehes CSI collection for Trigger mode
 #[embassy_executor::task]
 pub async fn sta_connection(op_mode: StaOperationMode) {
     // Acquire Controller receiver
@@ -298,7 +297,7 @@ pub async fn sta_connection(op_mode: StaOperationMode) {
         // Trigger Logic
         match op_mode {
             StaOperationMode::Trigger(_) => {
-                // Retrieved Updated Configuration
+                // Retrieved Updated Configuration)
                 let csi_config = CSI_CONFIG_CH.receive().await;
                 // Build CSI Configuration
                 let csi_cfg = build_csi_config(csi_config.clone());
@@ -351,7 +350,6 @@ pub async fn sta_connection(op_mode: StaOperationMode) {
 }
 
 // This task manages network operations for the station
-// This includes waiting for link up, DHCP, etc. followed by managing UDP connection with trigger source
 #[embassy_executor::task]
 pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperationMode) {
     // Retrieve acquired IP information from DHCP
@@ -483,11 +481,12 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
             // Message format w/ seq_no:
             // [0..1]   : 2 bytes seq_no (u16) - big endian
             // [2]      : 1 byte for CSI data format (mapping below)
-            // [2..7]   : 4 bytes timestamp (u32) - big endian
-            // [7..n]   : n-6 bytes CSI data (i8)
+            // [3..6]   : 4 bytes timestamp (u32) - big endian
+            // [7..12]  : 6 bytes MAC Address of Station
+            // [13..n]   : n-6 bytes CSI data (i8)
 
-            // Width of message (619) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 612 bytes for CSI data
-            let mut message_u8: Vec<u8, 619> = Vec::new();
+            // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
+            let mut message_u8: Vec<u8, 625> = Vec::new();
             // let seq_num_en = SEQ_NUM_EN.load(core::sync::atomic::Ordering::SeqCst);
             loop {
                 // Wait for start signal
@@ -505,28 +504,15 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
                             // Clear the buffer for new message
                             message_u8.clear();
 
-                            // Wait for CSI data packet to update
-                            println!("Waiting on New CSI Data");
-                            // let proc_csi_data = proc_csi_data_rx.changed().await;
-
                             println!(
-                                "Sending CSI Data with Seq No: {}",
+                                "Sending Back CSI Data with Seq No: {}",
                                 proc_csi_data.sequence_number
                             );
 
-                            // CSI is captured in a callback that does not have access to the ICMP sequence number
-                            // The CSI callback, however, does have access to the timestamp of the packet
-                            // So we use a global context to store the last captured ICMP sequence number and timestamp
-                            // We use timestamp to match the CSI to the ICMP sequence number
-
-                            // Append the sequence number to the message, if enabled
-                            // if seq_num_en {
+                            // Append the sequence number to the message
                             message_u8
                                 .extend_from_slice(&proc_csi_data.sequence_number.to_be_bytes())
                                 .unwrap();
-                            // } else {
-                            //     message_u8.extend_from_slice(&0_u16.to_be_bytes()).unwrap();
-                            // }
 
                             // Append the data format to the message
                             message_u8.push(proc_csi_data.data_format as u8).unwrap();
@@ -535,6 +521,9 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
                             message_u8
                                 .extend_from_slice(&proc_csi_data.timestamp.to_be_bytes())
                                 .unwrap();
+
+                            // Append the MAC Address
+                            message_u8.extend_from_slice(&proc_csi_data.mac).unwrap();
 
                             // Append the CSI data to the message
                             for x in proc_csi_data.csi_data.iter() {

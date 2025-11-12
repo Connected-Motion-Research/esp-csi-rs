@@ -69,10 +69,6 @@ impl CSIAccessPointStation {
     /// 'ApOperationMode' is set to Monitor
     pub async fn new_with_defaults(wifi_controller: WifiController<'static>) -> Self {
         CONTROLLER_CH.send(wifi_controller).await;
-        // ACCESSPOINT_CONFIG_CH
-        //     .send(AccessPointConfiguration::default())
-        //     .await;
-        // CLIENT_CONFIG_CH.send(ClientConfiguration::default()).await;
         Self {
             op_mode: ApOperationMode::Monitor,
             ap_config: AccessPointConfiguration::default(),
@@ -164,13 +160,10 @@ impl CSIAccessPointStation {
     /// Stops Collection & Returns WiFi Controller Instance
     pub async fn stop_collection(&self) {
         stop_collection().await;
-        // START_COLLECTION.signal(false);
-        // self.controller_rx.receive().await
     }
 
     /// Recaptures WiFi Controller Instance
     pub async fn recapture_controller(&self) -> WifiController<'static> {
-        // self.controller_rx.receive().await
         recapture_controller().await
     }
 
@@ -192,7 +185,7 @@ impl CSIAccessPointStation {
 
     /// Retrieve the latest recieved CSI unprocessed raw data packet
     /// This method does not work if the Access Point is in Monitor Mode
-    pub async fn get_csi_data_raw(&mut self) -> Result<Vec<u8, 619>> {
+    pub async fn get_csi_data_raw(&mut self) -> Result<Vec<u8, 625>> {
         match self.op_mode {
             ApOperationMode::Monitor => Err(crate::error::Error::SystemError(
                 "get_csi_data_raw() not supported in Monitor Mode",

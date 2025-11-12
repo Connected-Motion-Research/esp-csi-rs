@@ -1,6 +1,6 @@
 //! Example of Access Point + Station Mode for CSI Collection
 //!
-//! This configuration allows other ESP devices configured in Access Point + Station Mode to connect and collect CSI data.
+//! This configuration allows other ESP devices configured in Station Mode to connect and collect CSI data.
 //! This configuration also allows the Access Point to connect to a another router/gateway simultaneously as a Station.
 //!
 //! This configuration would be useful if the CSI collection network requires access to the internet.
@@ -8,8 +8,6 @@
 //!
 //! At least two devices are needed in this configuration.
 //! More ESP stations connecting to the Access Point + Station can also be added to form a star topology.
-//!
-//! IMPORTANT NOTE: The AP + Station collects CSI data but does not generate traffic.
 //!
 //! Connection Options:
 //! - Option 1: Allow one ESP configured as a Station to connect to the ESP Access Point + Station.
@@ -114,7 +112,7 @@ async fn main(spawner: Spawner) {
     csi_coll_ap.start_collection().await;
     println!("Started AP First Time");
 
-    // Collect for 2 Seconds
+    // Collect for 60 Seconds
     Timer::after(Duration::from_secs(60)).await;
 
     // Stop Collection & Recapture Controller for Next Collection

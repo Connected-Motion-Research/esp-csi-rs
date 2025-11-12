@@ -41,22 +41,22 @@
 //!
 //! #### Access Point & Access Point + Station
 //! AP and AP/STA modes do not collect CSI locally, they are merely CSI collection enablers for stations. They rely on connected stations to capture CSI data. APs and AP/STAs, however, can operate as external traffic generators for connected stations. The CSI collected at the stations is then propagated back through a UDP message to the trigger source (AP or AP/STA).
-//! AP/STA mode is useful only if an internet connection to sync NTP is required.
+//! The AP/STA mode is useful only if an internet connection to sync NTP is required.
 //!
 //! ### Operation Modes
-//! To recieve CSI data, there needs to be regular traffic on the network. This is enabled by setting an operation mode. Access points and Stations have two operation modes to select from, Trigger and Monitor. Sniffers do not require this since they "sniff" existing traffic on the channel.
-//! Note that in all cases CSI generation always happens at the station end.
+//! To recieve CSI data, there needs to be regular traffic on the network. This is enabled by setting an operation mode. Access points and Stations have two operation modes to select from; Trigger and Monitor. Sniffers do not require this since they "sniff" existing traffic on the channel.
+//!
 //! #### Trigger Mode
-//! In this mode, the `CSICollector` is configured to generate ICMP traffic at a desired rate.
-//! When an AP is configured as a trigger then it would generate ICMP Echo Request broadcasts at a defined rate. The AP in turn, recieves the CSI collected at the destination tagged with the request sequence number.
-//! When a Station is configured as a trigger then it would generate ICMP traffic with the Access Point its connected to at a defined rate.
+//! In this mode, the ESP is configured to generate ICMP traffic at a desired rate.
+//! When an AP ESP is configured as a trigger then it would generate ICMP Echo Request broadcasts at a defined rate. The AP in turn, recieves the CSI collected at the destination tagged with the request sequence number.
+//! When a Station ESP is configured as a trigger then it would generate ICMP traffic with the Access Point its connected to at a defined rate.
 //!
 //! #### Monitor Mode
-//! In this mode, the `CSICollector` is configured to monitor any incoming traffic.
+//! In this mode, the ESP is configured to monitor any incoming traffic.
 //! When an AP is configured as a monitor then it simply responds to dummy traffic to stimulate CSI at the traffic generation source.
 //! When a Station is configured as a monitor then it monitors incoming ICMP Echo Request traffic stimulating CSI generation and sends back the collected CSI to the trigger source with the sequence number tagged.
 //!
-//! **Note:** The AP and the Station should have oppsing modes. Meaning if the AP is configured as a trigger then the Station needs to be a monitor and vice versa. When connecting a station to a commercial router then only trigger mode works since we have no control over the router.
+//! **Note:** ESP AP and Station connecting pairs should always have oppsing modes. Meaning if the AP is configured as a trigger then the Station needs to be a monitor and vice versa. When connecting a station to a commercial router then only trigger mode works since there is no control over the router.
 //!
 //! ### External Trigger Data Formatting
 //! If sending an external trigger, the returned UDP message is formatted as follows:
@@ -65,17 +65,19 @@
 //!
 //! `[2]`      : 1 byte for CSI data format (Refer to the `RxCSIFmt` enum for details)
 //!
-//! `[2..7]`   : 4 bytes for capture timestamp (u32) - big endian
+//! `[3..6]`   : 4 bytes for capture timestamp (u32) - big endian
 //!
-//! `[7..n]`   : Up to 612 bytes of raw CSI data (i8)
+//! `[7..12]`  : 6 bytes for MAC address of the station
+//!
+//! `[13..n]`  : Up to 612 bytes of raw CSI data (i8)
 //!
 //! ### Collecting & Processing CSI Data
-//! There are three ways to collect CSI data using `esp-csi-rs`:
+//! There are two ways to collect CSI data using `esp-csi-rs`:
 //! - **Process a** `CSIDataPacket`: The `get_csi_data()` method returns a `CSIDataPacket` struct that contains all the captured CSI and its metadata. This data can be processed locally, stored to a file, or even sent to a storage device (Ex. SD Card).
 //! - **Print to console**: `CSIDataPacket` offers a `print_csi_w_metadata` method that formats and prints the CSI data to the console. This data can then be stored and processed by a host device.
-//! - **Send to Trigger**: Recieve a UDP Message by providing an external ICMP echo request trigger.
 //!
-//! ### Example for Collecting CSI in Station Mode
+//!
+//! ### Example for Collecting CSI with Station Trigger
 //!
 //! There are more examples in the repository. The example below demonstrates how to collect CSI data with an ESP configured in Station mode.
 //!
@@ -85,49 +87,45 @@
 //!
 //! #### Step 1: Create a CSI Collection Configuration/Profile
 //!```rust, no_run
-//! let csi_collector = CSICollector::new(
-//!     WiFiConfig {
-//!         // SSID & Password of the Access Point or Router the Station will be connect to
-//!         ssid: "AP_SSID".try_into().unwrap(),
-//!         password: "AP_PASSWORD".try_into().unwrap(),
-//!         ..Default::default()
-//!     },
-//!     // We Will Connect as a Station
-//!     esp_csi_rs::WiFiMode::Station,
-//!     // Use Default CSI Configuration Parameters
-//!     CSIConfig::default(),
-//!     // Generate UDP traffic every 1 second
-//!     TrafficConfig {
-//!         traffic_type: TrafficType::UDP,
-//!         traffic_interval_ms: 1000,
-//!     },
-//!     // Enable traffic
-//!     true,
-//!     // Disable Sequence Number Capture Enable
-//!     false,
-//! );
+//!    let mut csi_coll_sta = CSIStation::new(
+//!        CSIConfig::default(),
+//!        ClientConfiguration {
+//!            ssid: "esp".into(),
+//!            password: "12345678".into(),
+//!            auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+//!            channel: Some(1),
+//!            ..Default::default()
+//!        },
+//!        // Configure the traffic frequency to 1 Hz (1 packets per second)
+//!        StaOperationMode::Trigger(StaTriggerConfig { trigger_freq_hz: 1 }),
+//!        // Don't retrieve NTP time
+//!        false,
+//!        controller,
+//!    )
+//!    .await;
 //!```
 //!
 //! #### Step 2: Initialize CSI Collection
 //!```rust, no_run
-//!csi_collector.init(wifi, init, seed, &spawner).unwrap();
+//!csi_coll_sta.init(interfaces, &spawner).await.unwrap();
 //!```
 //!
 //! #### Step 3: Start Collection
 //!```rust, no_run
-//! // Starts Collection for 10 seconds then stops
-//!csi_collector.start(10);
+//!csi_collector.start_collection();
 //!```
 //!
-//! #### Step 4: Retrieve CSI Data
+//! #### Step 4: Print CSI Data to Console for a Certain Amount of Time
 //! ```rust, no_run
-//! let csi = csi_collector.get_csi_data().await;
-//! // CSIDataPacket processing code
+//!    with_timeout(Duration::from_secs(5), async {
+//!        loop {
+//!            csi_coll_sta.print_csi_w_metadata().await;
+//!        }
+//!    })
+//!    .await
+//!    .unwrap_err();
 //!```
-//! Alternatively, you can print the CSI data & metadata directly to console as follows:
-//!```rust, no_run
-//! csi_collector.print_csi_w_metadata().await;
-//!```
+//! Alternatively you can use the `get_cs_data` abstraction that returns a `CSIDataPacket` type that provides access to the raw data.
 
 #![no_std]
 
@@ -146,7 +144,7 @@ use defmt::info;
 #[cfg(feature = "defmt")]
 use defmt::println;
 
-use esp_wifi::wifi::{PromiscuousPkt, Sniffer};
+use esp_wifi::wifi::{sta_mac, PromiscuousPkt, Sniffer};
 
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
@@ -207,8 +205,7 @@ static DHCP_CLIENT_INFO: Signal<CriticalSectionRawMutex, IpInfo> = Signal::new()
 // Channels
 static CONTROLLER_CH: Channel<CriticalSectionRawMutex, WifiController<'static>, 1> = Channel::new();
 static CSI_CONFIG_CH: Channel<CriticalSectionRawMutex, CSIConfig, 1> = Channel::new();
-static MAC_FIL_CH: Channel<CriticalSectionRawMutex, Option<[u8; 6]>, 1> = Channel::new();
-static CSI_UDP_RAW_CH: Channel<CriticalSectionRawMutex, Vec<u8, 619>, 2> = Channel::new();
+static CSI_UDP_RAW_CH: Channel<CriticalSectionRawMutex, Vec<u8, 625>, 2> = Channel::new();
 
 // CSI PubSub Channels
 static CSI_PACKET: PubSubChannel<CriticalSectionRawMutex, CSIDataPacket, 4, 1, 1> =
@@ -378,12 +375,6 @@ pub async fn process_csi_packet() {
     // Subscribe to CSI packet capture updates
     let mut csi_packet_sub = CSI_PACKET.subscriber().unwrap();
     let proc_csi_packet_sender = PROC_CSI_DATA.sender();
-
-    // Receiver for the ICMP info from the sniffer
-    // let icmp_receiver = ICMP_INFO_CH.receiver();
-
-    // Buffer for ICMP info that arrives *before* its matching CSI packet
-    // let mut icmp_buffer: heapless::Vec<IcmpInfo, 4> = heapless::Vec::new();
 
     // Loop that will process CSI data as soon as it arrives
     loop {
@@ -556,62 +547,11 @@ fn extract_icmp_info(payload: &[u8]) -> Option<(u16, Ipv4Address)> {
     None
 }
 
-// Function to extract ICMP sequence number from a raw packet
-// fn extract_icmp_sequence(payload: &[u8]) -> Option<u16> {
-//     // Possible offsets
-//     let offsets = [
-//         (0, "Direct IP"),
-//         (2, "QoS header"),
-//         (8, "LLC/SNAP header"),
-//         (10, "QoS + LLC/SNAP header"),
-//         (16, "QoS + padding + LLC/SNAP"),
-//     ];
-
-//     for &(offset, _desc) in offsets.iter() {
-//         // Check for IP header (minimum 20 bytes)
-//         if payload.len() < offset + 20 {
-//             continue;
-//         }
-
-//         let ip_header = &payload[offset..offset + 20];
-
-//         // Verify IPv4 (version = 4)
-//         if ip_header[0] >> 4 != 4 {
-//             continue;
-//         }
-
-//         // Extract IP header length (IHL in 4-byte words)
-//         let ip_header_len = (ip_header[0] & 0x0F) as usize * 4;
-//         if ip_header_len < 20 {
-//             continue;
-//         }
-
-//         // Check for ICMP header (8 bytes)
-//         if payload.len() < offset + ip_header_len + 8 {
-//             continue;
-//         }
-
-//         // Verify ICMP protocol (byte 9 in IP header = 0x01)
-//         if ip_header[9] != 0x01 {
-//             continue;
-//         }
-
-//         let icmp_header = &payload[offset + ip_header_len..offset + ip_header_len + 8];
-
-//         // Verify ICMP Echo Request (8) or Reply (0)
-//         if icmp_header[0] != 0 && icmp_header[0] != 8 {
-//             continue;
-//         }
-
-//         // Extract sequence number (bytes 6-7, big endian)
-//         let sequence_no = u16::from_be_bytes([icmp_header[6], icmp_header[7]]);
-//         return Some(sequence_no);
-//     }
-//     None
-// }
-
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
+    let mut sta_mac_address = [0_u8; 6];
+    sta_mac(&mut sta_mac_address);
+
     let rssi = if info.rx_cntl.rssi > 127 {
         info.rx_cntl.rssi - 256
     } else {
@@ -625,7 +565,7 @@ fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
         sequence_number: seq_no,
         data_format: RxCSIFmt::Undefined,
         date_time: None,
-        mac: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        mac: sta_mac_address,
         rssi,
         bandwidth: info.rx_cntl.cwb,
         antenna: info.rx_cntl.ant,
@@ -654,11 +594,6 @@ fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
 
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_wifi::wifi::wifi_csi_info_t) {
-    // If filter for MAC address is set, no need to proceed if address doesnt match
-    // if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
-    //     println!("MAC Address {:02X?} Filtered Out", info.mac);
-    //     return;
-    // }
     let rssi = if info.rx_ctrl.rssi() > 127 {
         info.rx_ctrl.rssi() - 256
     } else {
@@ -815,41 +750,6 @@ async fn connect_wifi() {
     CONTROLLER_CH.send(controller).await;
 }
 
-// pub async fn get_bssid(ssid: &str) -> [u8; 6] {
-//     let mut controller = CONTROLLER_CH.receive().await;
-//     match controller.start_async().await {
-//         Ok(_) => println!("WiFi Started"),
-//         Err(e) => {
-//             panic!("Failed to start WiFi: {:?}", e);
-//         }
-//     }
-//     let mut scan_config = esp_wifi::wifi::ScanConfig::default();
-//     scan_config.ssid = Some(ssid);
-
-//     let ap_info = match controller.scan_with_config_async(scan_config).await {
-//         Ok(aps) => {
-//             for ap in &aps {
-//                 if ap.ssid == ssid {
-//                     println!("Found AP - SSID: {}, BSSID: {:02X?}", ap.ssid, ap.bssid);
-//                     return ap.bssid;
-//                 } else {
-//                     continue;
-//                 }
-//             }
-//             println!("Failed to finded matching SSID. MAC filtering disabled.");
-//             [0u8; 6]
-//         }
-//         Err(_e) => {
-//             println!("Failed to scan for Access Points. MAC filtering disabled.");
-//             [0u8; 6]
-//         }
-//     };
-//     controller.stop_async().await;
-//     controller.disconnect_async().await;
-//     CONTROLLER_CH.send(controller).await;
-//     ap_info
-// }
-
 async fn run_ntp_sync(sta_stack: Stack<'static>) {
     println!("Running NTP Sync");
     // Get Current SNTP unix time values
@@ -896,16 +796,6 @@ async fn run_ntp_sync(sta_stack: Stack<'static>) {
     }
     // Signal that NTP Sync is complete
 }
-
-/// Updates Client Configuration
-// async fn update_client_config(sta_config: ClientConfiguration) {
-//     CLIENT_CONFIG_CH.send(sta_config).await;
-// }
-
-/// Updates Access Point Configuration
-// async fn update_ap_config(ap_config: AccessPointConfiguration) {
-//     ACCESSPOINT_CONFIG_CH.send(ap_config).await;
-// }
 
 /// Stops Collection
 async fn stop_collection() {
@@ -1014,7 +904,7 @@ async fn run_dhcp_client(sta_stack: Stack<'static>) {
 /// - rx_state: 0 (assumes no error)
 ///
 /// Returns an error if the buffer length is invalid (<7 bytes or CSI data >612 bytes).
-pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
+async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
     // Retrive the new CSI raw data from UDP channel
     let raw_csi_data = CSI_UDP_RAW_CH.receive().await;
 
@@ -1024,7 +914,7 @@ pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
         ));
     }
 
-    let csi_data_start = 7;
+    let csi_data_start = 13;
     let csi_len = (raw_csi_data.len() - csi_data_start) as u16;
     if csi_len > 612 {
         return Err(crate::error::Error::SystemError(
@@ -1062,6 +952,15 @@ pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
         raw_csi_data[6],
     ]);
 
+    let mac_address = [
+        raw_csi_data[7],
+        raw_csi_data[8],
+        raw_csi_data[9],
+        raw_csi_data[10],
+        raw_csi_data[11],
+        raw_csi_data[12],
+    ];
+
     // Reconstruct CSI data (u8 -> i8, preserving sign via bit reinterpretation)
     let mut csi_data = Vec::new();
     for &b in &raw_csi_data[csi_data_start..] {
@@ -1073,7 +972,7 @@ pub async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
 
     // Build CSIDataPacket with defaults for missing fields
     Ok(CSIDataPacket {
-        mac: [0u8; 6],
+        mac: mac_address,
         rssi: 0,
         timestamp,
         rate: 0,

@@ -81,9 +81,6 @@ async fn main(spawner: Spawner) {
         },
         // Configure the traffic frequency to 1 Hz (1 packets per second)
         StaOperationMode::Trigger(StaTriggerConfig { trigger_freq_hz: 1 }),
-        // Don't filter any MAC addresses
-        // Useful when in monitor mode since sniffer function is active
-        None,
         // Set to true only if there is an internet connection at AP (commercial router or AP+STA with internet)
         false,
         controller,

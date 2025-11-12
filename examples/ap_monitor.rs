@@ -96,8 +96,8 @@ async fn main(spawner: Spawner) {
     csi_coll_ap.start_collection().await;
     println!("Started AP First Time");
 
-    // Run for 2 Seconds
-    Timer::after(Duration::from_secs(3)).await;
+    // Run for 60 Seconds
+    Timer::after(Duration::from_secs(60)).await;
 
     // Stop & Recapture Controller for Next Collection Activity
     csi_coll_ap.stop_collection().await;
