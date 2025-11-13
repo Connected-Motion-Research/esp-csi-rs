@@ -29,23 +29,46 @@ With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JT
 `esp-csi-rs` reduces device to host transfer overhead further by supporting `defmt`. `defmt` is a highly efficient logging framework introduced by Ferrous Systems that targets resource-constrained devices. More detail about `defmt` can be found [here](https://defmt.ferrous-systems.com/).
 
 ### ✅ Traffic Generation
-When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate either ICMP (simple ping) or UDP traffic. The crate also allows you to control the intervals at which traffic is generated. The crate also supports external traffic triggers. The resulting CSI from an external trigger is sent back as a UDP packet on port 10987.
+When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate ICMP traffic. The crate also allows you to control the intervals at which traffic is generated. The crate also supports external traffic triggers. The resulting CSI from an external trigger is sent back as a UDP packet.
+
+### ✅ Port Configuration
+Destination and source port numbers can be configured for UDP packets carrying CSI data. This is useful in cases where seperate destination port numbers are required at the CSI recieving end (Ex. Star Topology).
+
+### ✅ Sequence Numbers Tags
+External trigger traffic are ICMP echo requests with sequence numbers. As such, UDP traffic carrying collected CSI data are tagged with sequence numbers that triggered the collection. This is useful in star topologies where the traffic generator wants to track the CSI generated with a single broadcast across several stations.
+
 
 ### ✅ NTP Timestamp
-In architechtres involving a connection to a commercial router with internet access,the ESP device synchronizes with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
+The crate supports synchronization with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
 
-### ✅ Network Architechtures
-`esp-csi-rs` allows you to configure a device to one several modes including access point, station, or sniffer. You would need at least `esp-csi-rs` supports several architechtural setups allowing for flexibility in collection of CSI. These architechtures can be configured programmatically through the crate configuration options. `esp-csi-rs` supports four different architechtures as follows:
 
-1. <span style="color:red">***Sniffer***</span>: This is the simplest setup where only one ESP device is needed. The device is configured to "sniff" packets on surrounding networks and extract CSI data.
-2. <span style="color:red">***RouterStation***</span>: In this setup only one ESP device is needed as well and is configrued as a Station. The ESP station then connects to a commercial router instead. As menntioned earlier, setups including a commercial router have the advantage of syncronizing with an NTP time server. The station sends traffic to the commercial router to acquire CSI data.
-3. <span style="color:red">***AccessPointStation***</span>: This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point. The station sends traffic to the access point to acquire CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access point. 
-4. <span style="color:red">***RouterAccessPointStation***</span>:This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point + Station. The ESP Access Point + Station connects to a commercial router for internet access while simultaneously providing the ability for stations to connect to it for CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access Point + Station. 
+## Network Architechtures
+`esp-csi-rs` allows you to configure a device to one several modes including access point, station, or sniffer. You would need at least `esp-csi-rs` supports several network setups allowing for flexibility in collection of CSI. Possible architechtures including the following:
+
+1. <span style="color:red">***ESP Sniffer***</span>: This is the simplest setup where only one ESP device is needed. The device is configured to "sniff" packets on surrounding networks and extract CSI data.
+2. <span style="color:red">***Commercial Router Connected to an ESP Station***</span>: In this setup only one ESP device is needed as well and is configrued as a Station. The ESP station then connects to a commercial router. The station sends traffic to the commercial router to acquire CSI data. Additionally, setups including a commercial router have the advantage of syncronizing with an NTP time server if needed. 
+3. <span style="color:red">***ESP Access Point Connected to an ESP Station***</span>: This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point. The station sends traffic to the access point to acquire CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access point.
+4. <span style="color:red">***Commercial Router Connected to an ESP Access Point/Station Connected to an ESP Station***</span>: This setup is similar to the Access Point setup with the difference that the Access Point + Station can also connect to a commercial router for internet access. This architechure is also expandable where additional stations can be introduces to connect to the central Access point.
+5. <span style="color:red">***ESP Access Point Connected to Several ESP Stations***</span>: This setup is the same as 3 except that several stations connect to the access point.
+6. <span style="color:red">***Commercial Router Connected to an ESP Access Point/Station Connected to Several ESP Stations***</span>: This setup is the same as 4 except that several stations connect to the access point.
+
 
 <div align="center">
 
 ![Network Architechtures 1](/assets/NetArch1.png)
 ![Network Architechtures 2](/assets/NetArch2.png)
+
+</div>
+
+## Traffic Generation
+
+Stimulating CSI data requires WiFi channel traffic. This traffic can be artifically generated by `esp-csi-rs`. In non-sniffer networks, CSI in `esp-csi-rs` is also always stimulated at a Station device but can be collected at a Station or Access Point triggering the traffic. Traffic can be generated in two different ways, either locally by the station itself, or remotely by an access point the station is connected to. Traffic roles in `esp-csi-rs` are defined as follows:
+1. <span style="color:red">***Trigger***</span>: In this role, the access point or station is the source of traffic and where the CSI data output is collected. In the case of an Access Point trigger, the collected CSI is the CSI recieved from the Station where it was stimulated. Additionally, the traffic generated by the Access Point is ICMP Echo Request broadcasts with an incrementing sequence number.
+2. <span style="color:red">***Monitor***</span>: In this role, the access point or station monitor incoming traffic to stimulate CSI collection. In the case of the Station, stimulated CSI is sent back to the access point alongside a sequence number tag in a UDP message.
+
+<div align="center">
+
+![Traffic Generation](/assets/traffic-diagram.png)
 
 </div>
 
@@ -72,15 +95,30 @@ This is the simplest example of how this crate can be used. This example follows
 For more details refer to the crate [documentation](https://docs.rs/esp_csi_rs).
 
 ```rust
-use esp_csi_rs::{CSICollector, WiFiMode};
+use esp_csi_rs::{collector::CSISniffer, config::CSIConfig};
 
-let mut collector = CSICollector::new_with_defaults();
-collector.set_op_mode(WiFiMode::Sniffer);
-collector.start(None);
-loop {
-    collector.print_csi_w_metadata().await;
-}
+// Create a Collector Instance
+let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), controller).await;
+
+// Initialize CSI Collector
+csi_coll_snif.init(interfaces, &spawner).await.unwrap();
+
+// Start Collection
+csi_coll_snif.start_collection().await;
+
+// Collect for 2 Seconds
+with_timeout(Duration::from_secs(2), async {
+    loop {
+        csi_coll_snif.print_csi_w_metadata().await;
+    }
+})
+.await
+.unwrap_err();
+
+// Stop Collection
+csi_coll_snif.stop_collection().await;
 ```
+
 Everytime CSI data is captured, the resulting output looks like this:
 ```bash
 mac: D6:62:A7:DC:DF:7C

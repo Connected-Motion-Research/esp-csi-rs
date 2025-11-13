@@ -103,8 +103,8 @@ pub struct CSIStation {
     /// Synchronize NTP Time with Trigger Source
     /// Note: Requires internet connectivity at the Access Point
     pub sync_time: bool,
-    /// MAC Address Filter for CSI Data
-    mac_filter: Option<[u8; 6]>,
+    // MAC Address Filter for CSI Data
+    // mac_filter: Option<[u8; 6]>,
     /// Receiver for Processed CSI Data Packets
     csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
 }
@@ -130,7 +130,7 @@ impl CSIStation {
         Self {
             csi_config,
             sta_config,
-            mac_filter: None,
+            // mac_filter: None,
             op_mode,
             csi_data_rx,
             sync_time,
@@ -151,7 +151,7 @@ impl CSIStation {
         Self {
             csi_config: CSIConfig::default(),
             sta_config: ClientConfiguration::default(),
-            mac_filter: None,
+            // mac_filter: None,
             op_mode: StaOperationMode::Trigger(StaTriggerConfig::default()),
             csi_data_rx: proc_csi_data_rx,
             sync_time: false,
@@ -249,10 +249,15 @@ impl CSIStation {
         self.csi_config = csi_config;
     }
 
-    /// Updates MAC Address Filter
-    pub async fn update_mac_filter(&mut self, mac_filter: Option<[u8; 6]>) {
-        self.mac_filter = mac_filter;
+    /// Updates the Operation Mode
+    pub async fn update_op_mode(&mut self, op_mode: StaOperationMode) {
+        self.op_mode = op_mode;
     }
+
+    // Updates MAC Address Filter
+    // pub async fn update_mac_filter(&mut self, mac_filter: Option<[u8; 6]>) {
+    //     self.mac_filter = mac_filter;
+    // }
 
     /// Retrieve the latest available CSI data packet
     pub async fn get_csi_data(&mut self) -> Result<CSIDataPacket> {

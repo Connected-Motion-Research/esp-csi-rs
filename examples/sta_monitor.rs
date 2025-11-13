@@ -77,8 +77,8 @@ async fn main(spawner: Spawner) {
     let mut csi_coll_sta = CSIStation::new(
         CSIConfig::default(),
         ClientConfiguration {
-            ssid: "esp".into(),
-            password: "12345678".into(),
+            ssid: "SSID".into(),
+            password: "PASSWORD".into(),
             auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
             channel: Some(1),
             ..Default::default()

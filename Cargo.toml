@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["Omar Hiari"]
 description = "ESP CSI Driver for Rust"
@@ -35,7 +35,7 @@ defmt = [
 println = ["esp-backtrace/println"]
 ## Enable the JTAG serial interface for logging. Only supported by ESP32-C3, ESP32-C6, and ESP32-S3.
 jtag-serial = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
-## Automaically select the logging interface based on the target.
+## Automaically select the logging interface based on the target (Ex. UART).
 auto = ["esp-println/auto"]
 
 ## Support for the ESP32

@@ -216,4 +216,9 @@ impl CSIAccessPointStation {
         // update_client_config(sta_config).await;
         self.sta_config = sta_config;
     }
+
+    /// Updates the Operation Mode
+    pub async fn update_op_mode(&mut self, op_mode: ApOperationMode) {
+        self.op_mode = op_mode;
+    }
 }

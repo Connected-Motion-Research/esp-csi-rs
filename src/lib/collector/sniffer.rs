@@ -25,24 +25,16 @@ use crate::{
 pub struct CSISniffer {
     /// CSI Collection Parameters
     pub csi_config: CSIConfig,
-    /// MAC Address Filter for CSI Data
-    pub mac_filter: Option<[u8; 6]>,
     csi_data_rx: Receiver<'static, CriticalSectionRawMutex, CSIDataPacket, 3>,
-    // controller_rx: ChannelReceiver<'static, CriticalSectionRawMutex, WifiController<'static>, 1>,
 }
 
 impl CSISniffer {
     /// Creates a new `CSISniffer` instance with a defined configuration/profile.
-    pub async fn new(
-        csi_config: CSIConfig,
-        mac_filter: Option<[u8; 6]>,
-        wifi_controller: WifiController<'static>,
-    ) -> Self {
+    pub async fn new(csi_config: CSIConfig, wifi_controller: WifiController<'static>) -> Self {
         let csi_data_rx = PROC_CSI_DATA.receiver().unwrap();
         CONTROLLER_CH.send(wifi_controller).await;
         Self {
             csi_data_rx,
-            mac_filter,
             csi_config,
         }
     }
@@ -53,7 +45,6 @@ impl CSISniffer {
         CONTROLLER_CH.send(wifi_controller).await;
         Self {
             csi_data_rx: proc_csi_data_rx,
-            mac_filter: None,
             csi_config: CSIConfig::default(),
         }
     }
@@ -99,11 +90,6 @@ impl CSISniffer {
     /// Update CSI Configuration
     pub async fn update_csi_config(&mut self, csi_config: CSIConfig) {
         self.csi_config = csi_config;
-    }
-
-    /// Update MAC Address Filter
-    pub async fn update_mac_filter(&mut self, mac_filter: Option<[u8; 6]>) {
-        self.mac_filter = mac_filter;
     }
 
     /// Print the latest CSI data with metadata to console

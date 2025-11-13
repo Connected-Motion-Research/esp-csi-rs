@@ -59,7 +59,7 @@ async fn main(spawner: Spawner) {
 
     // Create a Sniffer CSI Collector
     // Don't filter any MAC addresses out
-    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), None, controller).await;
+    let mut csi_coll_snif = CSISniffer::new(CSIConfig::default(), controller).await;
 
     // Initialize CSI Collector
     csi_coll_snif.init(interfaces, &spawner).await.unwrap();

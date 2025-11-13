@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",

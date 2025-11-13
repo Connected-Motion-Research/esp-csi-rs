@@ -4,22 +4,22 @@
 //! Currently this crate supports only the ESP `no-std` development framework.
 //!
 //! ### Choosing a device
-//! In terms of hardware, you need to make sure that the device you choose supports WiFI and CSI collection.
-//! Currently supported deveices are:
+//! In terms of hardware, you need to make sure that the device you choose supports WiFi and CSI collection.
+//! Currently supported devices include:
 //! - ESP32
 //! - ESP32-C2
 //! - ESP32-C3
 //! - ESP32-C6
 //! - ESP32-S3
 //!
-//! In terms of software toolchain setup, you will need to specify the hardware you will be using. To minimize headache, it is recommended that you generate a project using `esp-generate` as explained next.
+//! In terms of project and software toolchain setup, you will need to specify the hardware you will be using. To minimize headache, it is recommended that you generate a project using `esp-generate` as explained next.
 //!
 //! ### Creating a project
-//! To use this crate you would need to create and setup a project for your ESP device then import the crate. This crate is compatible with `no-std` ESP development projects. You should also select the corresponding device by activating it in the crate features.
+//! To use this crate you would need to create and setup a project for your ESP device then import the crate. This crate is compatible with the `no-std` ESP development framework. You should also select the corresponding device by activating it in the crate features.
 //!
 //! To create a projects it is highly recommended to refer the to instructions in [The Rust on ESP Book](https://docs.esp-rs.org/book/) before proceeding. The book explains the full esp-rs ecosystem, how to get started, and how to generate projects for both `std` and `no-std`.
 //!
-//! Espressif has developed a project generation tool, `esp-generate`, to ease this process and is recommended for new projects. As an example, you can create a `no-std` project as follows:
+//! Espressif has developed a project generation tool, `esp-generate`, to ease this process and is recommended for new projects. As an example, you can create a `no-std` project for the ESP32-C3 device as follows:
 //!
 //! ```bash
 //! cargo install esp-generate
@@ -29,15 +29,15 @@
 //! ## Feature Flags
 #![doc = document_features::document_features!()]
 //! ## Using the `esp-csi-rs` Crate
-//! With the exception of sniffer mode, the collection of CSI requires at least two WiFI enabled devices; an Access Point and a Station. Both devices could be ESP devices one programmed as a Station and another as an Access Point. Alternatively, the simplest setup is using one ESP device as a Station connecting to an existing Access Point like a home router.
-//! This crate supports creating both Access Points and Stations and there are several examples to demonstrate in the repository. When both devices are ESPs, the Access Point and the Station are able to collect CSI data.
+//! With the exception of sniffer mode, the collection of CSI requires at least two WiFi enabled devices; an Access Point and a Station. Both devices could be ESP devices one programmed as a Station and another as an Access Point. Alternatively, the simplest setup is using one ESP device as a Station connecting to an existing Access Point like a home router.
+//! This crate supports creating both Access Points and Stations and there are several examples to demonstrate in the repository. The sections below describes in more detail the collector types and operation modes.
 //!
 //! ### Collector Types
 //! #### Sniffer
 //! A sniffer collects CSI data for all observed channel traffic.
 //!
 //! #### Station
-//! In the `esp-csi-rs` the station is the CSI generator. CSI at the station is stimulated by traffic generated locally or from an external source. A station can have one connection that is either another ESP access point or a commercial router.
+//! In the `esp-csi-rs` the station is the CSI reciever. CSI at the station is stimulated by traffic generated locally or from an external source. A station can have one connection that is either another ESP access point or a commercial router.
 //!
 //! #### Access Point & Access Point + Station
 //! AP and AP/STA modes do not collect CSI locally, they are merely CSI collection enablers for stations. They rely on connected stations to capture CSI data. APs and AP/STAs, however, can operate as external traffic generators for connected stations. The CSI collected at the stations is then propagated back through a UDP message to the trigger source (AP or AP/STA).
@@ -87,22 +87,22 @@
 //!
 //! #### Step 1: Create a CSI Collection Configuration/Profile
 //!```rust, no_run
-//!    let mut csi_coll_sta = CSIStation::new(
-//!        CSIConfig::default(),
-//!        ClientConfiguration {
-//!            ssid: "esp".into(),
-//!            password: "12345678".into(),
-//!            auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-//!            channel: Some(1),
-//!            ..Default::default()
-//!        },
-//!        // Configure the traffic frequency to 1 Hz (1 packets per second)
-//!        StaOperationMode::Trigger(StaTriggerConfig { trigger_freq_hz: 1 }),
-//!        // Don't retrieve NTP time
-//!        false,
-//!        controller,
-//!    )
-//!    .await;
+//!let mut csi_coll_sta = CSIStation::new(
+//!    CSIConfig::default(),
+//!    ClientConfiguration {
+//!        ssid: "esp".into(),
+//!        password: "12345678".into(),
+//!        auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+//!        channel: Some(1),
+//!        ..Default::default()
+//!    },
+//!    // Configure the traffic frequency to 1 Hz (1 packets per second)
+//!    StaOperationMode::Trigger(StaTriggerConfig { trigger_freq_hz: 1 }),
+//!    // Don't retrieve NTP time
+//!    false,
+//!    controller,
+//!)
+//!.await;
 //!```
 //!
 //! #### Step 2: Initialize CSI Collection
@@ -117,13 +117,18 @@
 //!
 //! #### Step 4: Print CSI Data to Console for a Certain Amount of Time
 //! ```rust, no_run
-//!    with_timeout(Duration::from_secs(5), async {
-//!        loop {
-//!            csi_coll_sta.print_csi_w_metadata().await;
-//!        }
-//!    })
-//!    .await
-//!    .unwrap_err();
+//!with_timeout(Duration::from_secs(5), async {
+//!    loop {
+//!        csi_coll_sta.print_csi_w_metadata().await;
+//!    }
+//!})
+//!.await
+//!.unwrap_err();
+//!```
+//!
+//!#### Step 5: Stop Collection
+//! ```rust, no_run
+//!csi_collector.stop_collection();
 //!```
 //! Alternatively you can use the `get_cs_data` abstraction that returns a `CSIDataPacket` type that provides access to the raw data.
 
@@ -169,7 +174,7 @@ use heapless::Vec;
 pub mod collector;
 pub mod config;
 mod csi;
-mod error;
+pub mod error;
 mod time;
 
 use crate::config::*;
@@ -809,12 +814,11 @@ async fn recapture_controller() -> WifiController<'static> {
 }
 /// Starts CSI Collection
 async fn start_collection(conn_type: ConnectionType, config: Configuration) {
-    // Configure Connection
-    configure_connection(conn_type.clone(), config).await;
-
-    // In case controller isnt started already, start it
+    // In case controller isnt started already, configure connection and start again
     let controller = CONTROLLER_CH.receive().await;
     if !matches!(controller.is_started(), Ok(true)) {
+        // Configure Connection
+        configure_connection(conn_type.clone(), config).await;
         start_wifi().await;
     }
     CONTROLLER_CH.send(controller).await;
@@ -834,7 +838,6 @@ async fn start_collection(conn_type: ConnectionType, config: Configuration) {
     }
 
     CONTROLLER_CH.send(controller).await;
-
     // Signal Collection Start
     START_COLLECTION.sender().send(true);
 }

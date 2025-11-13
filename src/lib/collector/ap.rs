@@ -56,13 +56,13 @@ pub enum ApOperationMode {
 #[derive(PartialEq, Copy, Clone)]
 pub struct ApTriggerConfig {
     /// Trigger Packet Frequency
-    trigger_freq_hz: u32,
+    pub trigger_freq_hz: u32,
     /// Local Port #
-    local_port: u16,
+    pub local_port: u16,
     /// Trigger Type - Broadcast or Unicast
-    trigger_type: TriggerType,
+    pub trigger_type: TriggerType,
     /// Trigger Sequence Number Start
-    trigger_seq_num: u16,
+    pub trigger_seq_num: u16,
 }
 
 impl Default for ApTriggerConfig {
@@ -202,6 +202,11 @@ impl CSIAccessPoint {
     pub async fn update_ap_config(&mut self, ap_config: AccessPointConfiguration) {
         // update_ap_config(ap_config).await;
         self.ap_config = ap_config;
+    }
+
+    /// Updates the Operation Mode
+    pub async fn update_op_mode(&mut self, op_mode: ApOperationMode) {
+        self.op_mode = op_mode;
     }
 
     /// Retrieve the latest available CSI data packet
