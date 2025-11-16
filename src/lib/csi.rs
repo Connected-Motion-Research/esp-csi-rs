@@ -288,6 +288,7 @@ impl CSIDataPacket {
             _ => self.data_format = RxCSIFmt::Undefined,
         }
     }
+
     pub fn mac(&self) -> &[u8; 6] {
         &self.mac
     }
@@ -367,7 +368,7 @@ impl CSIDataPacket {
 
 #[cfg(feature = "esp32c6")]
 #[derive(Debug, Clone)]
-pub struct CSIData {
+pub struct CSIDataPacket {
     /// MAC address of the sender.
     pub mac: [u8; 6],
     /// Received Signal Strength Indicator.
@@ -380,12 +381,12 @@ pub struct CSIData {
     /// unit: dBm.
     pub noise_floor: i32,
     /// Length of packet including Frame Check Sequence(FCS).
-    pub sig_len: u16,
+    pub sig_len: u32,
     /// Reception state of the packet.
     /// 0 for no error, others indicate error codes.
     pub rx_state: u32,
     /// Length of dump buffer.
-    pub dump_len: u16,
+    pub dump_len: u32,
     /// Length of HE-SIG-B field (802.11ax).
     pub he_sigb_len: u32,
     /// Indicates if this is a single MPDU.
@@ -412,43 +413,33 @@ pub struct CSIData {
     pub rxmatch1: u32,
     /// Indicate whether the reception frame is from interface 0.
     pub rxmatch0: u32,
-    /// Optional NTP-based timestamp.
-    pub capture_time: Option<DateTime>,
+    /// Optional NTP-based Timestamp Indicating the Time CSI Captured.
+    pub date_time: Option<DateTime>,
     /// Sequence number associated with packet.
     pub sequence_number: u16,
     /// Length of CSI data.
     pub csi_data_len: u16,
+    /// Data format of the recieved CSI.
+    /// RxCSIFmt is a Compact Representation of the Different Recieved CSI Data Format Options as defined in the ESP WiFi Driver.
+    pub data_format: RxCSIFmt,
     /// Raw CSI data, largest case size is 612 bytes.
     pub csi_data: Vec<i8, 612>,
 }
 
 #[cfg(feature = "esp32c6")]
-impl CSIData {
-    pub fn print_csi(&self) {
+impl CSIDataPacket {
+    pub fn print_csi_w_metadata(&self) {
         // Calculate Elapsed time here and add offset to date_time then call to calculate new time
-        if let Some(date_time) = self.capture_time {
-            let elapsed_time = Instant::now()
-                .checked_duration_since(date_time.captured_at)
-                .unwrap_or(Duration::default());
-
-            // Add seconds and adjust for overflow from milliseconds
-            let total_time_secs = date_time.captured_secs + elapsed_time.as_secs();
-
-            // Add milliseconds and adjust if they exceed 1000
-            let total_millis = date_time.captured_millis + elapsed_time.as_millis();
-            let extra_secs = total_millis / 1000; // 1000ms = 1 second
-            let final_millis = total_millis % 1000; // Remainder in milliseconds
-
-            // Add extra seconds from milliseconds overflow to total seconds
-            let total_time_secs = total_time_secs + extra_secs;
-
-            // Now call the date-time conversion function
-            let (year, month, day, hour, minute, second, millis) =
-                unix_to_date_time(total_time_secs, final_millis);
-
+        if let Some(date_time) = &self.date_time {
             println!(
                 "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                year, month, day, hour, minute, second, millis
+                date_time.year,
+                date_time.month,
+                date_time.day,
+                date_time.hour,
+                date_time.minute,
+                date_time.second,
+                date_time.millisecond
             );
         }
         println!(
@@ -485,6 +476,10 @@ impl CSIData {
         #[cfg(feature = "println")]
         println!("{:?}", self.csi_data);
     }
+    pub fn csi_fmt_from_params(&mut self) {
+        self.data_format = RxCSIFmt::Undefined;
+    }
+
     pub fn mac(&self) -> &[u8; 6] {
         &self.mac
     }
@@ -501,13 +496,13 @@ impl CSIData {
     pub fn noise_floor(&self) -> i32 {
         self.noise_floor
     }
-    pub fn sig_len(&self) -> u16 {
+    pub fn sig_len(&self) -> u32 {
         self.sig_len
     }
     pub fn rx_state(&self) -> u32 {
         self.rx_state
     }
-    pub fn dump_len(&self) -> u16 {
+    pub fn dump_len(&self) -> u32 {
         self.dump_len
     }
     pub fn he_sigb_len(&self) -> u32 {

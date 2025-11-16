@@ -566,6 +566,7 @@ fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
     let mut csi_data = Vec::<i8, 612>::new();
     csi_data.extend(info.data.iter().map(|&b| b as i8));
 
+    #[cfg(not(feature = "esp32c6"))]
     let csi_packet = CSIDataPacket {
         sequence_number: seq_no,
         data_format: RxCSIFmt::Undefined,
@@ -594,6 +595,36 @@ fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
         csi_data: csi_data,
     };
 
+    #[cfg(feature = "esp32c6")]
+    let csi_packet = CSIDataPacket {
+        mac: sta_mac_address,
+        rssi,
+        data_format: RxCSIFmt::Undefined,
+        timestamp: info.rx_cntl.second,
+        rate: info.rx_cntl.rate,
+        noise_floor: info.rx_cntl.noise_floor,
+        sig_len: info.rx_cntl.sig_len,
+        rx_state: info.rx_cntl.rx_state,
+        dump_len: info.rx_cntl.dump_len,
+        he_sigb_len: info.rx_cntl.he_sigb_len,
+        cur_single_mpdu: info.rx_cntl.cur_single_mpdu,
+        cur_bb_format: info.rx_cntl.cur_bb_format,
+        rx_channel_estimate_info_vld: info.rx_cntl.rx_channel_estimate_info_vld,
+        rx_channel_estimate_len: info.rx_cntl.rx_channel_estimate_len,
+        second: info.rx_cntl.second,
+        channel: info.rx_cntl.channel,
+        is_group: info.rx_cntl.is_group,
+        rxend_state: info.rx_cntl.rxend_state,
+        rxmatch3: info.rx_cntl.rxmatch3,
+        rxmatch2: info.rx_cntl.rxmatch2,
+        rxmatch1: info.rx_cntl.rxmatch1,
+        rxmatch0: info.rx_cntl.rxmatch0,
+        date_time: None,
+        sequence_number: seq_no,
+        csi_data_len: info.len as u16,
+        csi_data: csi_data,
+    };
+
     CSI_PACKET.publish_immediate(csi_packet);
 }
 
@@ -615,6 +646,7 @@ fn capture_csi_info(info: esp_wifi::wifi::wifi_csi_info_t) {
         }
     }
 
+    #[cfg(not(feature = "esp32c6"))]
     let csi_packet = CSIDataPacket {
         sequence_number: 0,
         data_format: RxCSIFmt::Undefined,
@@ -647,6 +679,43 @@ fn capture_csi_info(info: esp_wifi::wifi::wifi_csi_info_t) {
         rx_state: info.rx_ctrl.rx_state(),
         sig_len: info.rx_ctrl.sig_len(),
         csi_data_len: csi_buf_len,
+        csi_data: csi_data,
+    };
+
+    #[cfg(feature = "esp32c6")]
+    let csi_packet = CSIDataPacket {
+        mac: [
+            info.mac[0],
+            info.mac[1],
+            info.mac[2],
+            info.mac[3],
+            info.mac[4],
+            info.mac[5],
+        ],
+        rssi,
+        timestamp: info.rx_ctrl.timestamp(),
+        rate: info.rx_ctrl.rate(),
+        noise_floor: info.rx_ctrl.noise_floor(),
+        sig_len: info.rx_ctrl.sig_len(),
+        rx_state: info.rx_ctrl.rx_state(),
+        dump_len: info.rx_ctrl.dump_len(),
+        he_sigb_len: info.rx_ctrl.he_sigb_len(),
+        cur_single_mpdu: info.rx_ctrl.cur_single_mpdu(),
+        cur_bb_format: info.rx_ctrl.cur_bb_format(),
+        rx_channel_estimate_info_vld: info.rx_ctrl.rx_channel_estimate_info_vld(),
+        rx_channel_estimate_len: info.rx_ctrl.rx_channel_estimate_len(),
+        second: info.rx_ctrl.second(),
+        channel: info.rx_ctrl.channel(),
+        is_group: info.rx_ctrl.is_group(),
+        rxend_state: info.rx_ctrl.rxend_state(),
+        rxmatch3: info.rx_ctrl.rxmatch3(),
+        rxmatch2: info.rx_ctrl.rxmatch2(),
+        rxmatch1: info.rx_ctrl.rxmatch1(),
+        rxmatch0: info.rx_ctrl.rxmatch0(),
+        date_time: None,
+        sequence_number: 0,
+        data_format: RxCSIFmt::Undefined,
+        csi_data_len: info.len as u16,
         csi_data: csi_data,
     };
 
@@ -929,7 +998,9 @@ async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
     let sequence_number = u16::from_be_bytes([raw_csi_data[0], raw_csi_data[1]]);
 
     // Extract data_format (u8 -> RxCSIFmt)
+    #[cfg(not(feature = "esp32c6"))]
     let fmt_u8 = raw_csi_data[2];
+    #[cfg(not(feature = "esp32c6"))]
     let (data_format, bandwidth, sig_mode, stbc, secondary_channel) = match fmt_u8 {
         0 => (RxCSIFmt::Bw20, 0, 0, 0, 0),
         1 => (RxCSIFmt::HtBw20, 0, 1, 0, 0),
@@ -974,7 +1045,8 @@ async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
     }
 
     // Build CSIDataPacket with defaults for missing fields
-    Ok(CSIDataPacket {
+    #[cfg(not(feature = "esp32c6"))]
+    let data_packet = CSIDataPacket {
         mac: mac_address,
         rssi: 0,
         timestamp,
@@ -1000,5 +1072,37 @@ async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
         data_format,
         csi_data_len: csi_len,
         csi_data,
-    })
+    };
+
+    #[cfg(feature = "esp32c6")]
+    let data_packet = CSIDataPacket {
+        mac: mac_address,
+        rssi: 0,
+        timestamp,
+        rate: 0,
+        noise_floor: 0,
+        sig_len: 0,
+        rx_state: 0,
+        dump_len: 0,
+        he_sigb_len: 0,
+        cur_single_mpdu: 0,
+        cur_bb_format: 0,
+        rx_channel_estimate_info_vld: 0,
+        rx_channel_estimate_len: 0,
+        second: 0,
+        channel: 0,
+        is_group: 0,
+        rxend_state: 0,
+        rxmatch3: 0,
+        rxmatch2: 0,
+        rxmatch1: 0,
+        rxmatch0: 0,
+        date_time: None,
+        sequence_number,
+        data_format: RxCSIFmt::Undefined,
+        csi_data_len: csi_len,
+        csi_data,
+    };
+
+    Ok(data_packet)
 }
