@@ -37,6 +37,8 @@ println = ["esp-backtrace/println"]
 jtag-serial = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
 ## Automaically select the logging interface based on the target (Ex. UART).
 auto = ["esp-println/auto"]
+## Enable the UART interface for logging
+uart = ["esp-println/uart"]
 
 ## Support for the ESP32
 esp32 = [
