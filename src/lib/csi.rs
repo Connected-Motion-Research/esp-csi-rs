@@ -153,6 +153,7 @@ impl CSIDataPacket {
         println!("noise floor: {}", self.noise_floor);
         println!("channel: {}", self.channel);
         println!("timestamp: {}", self.timestamp);
+        println!("sequence number: {}", self.sequence_number);
         println!("sig len: {}", self.sig_len);
         println!("rx state: {}", self.rx_state);
         println!("secondary channel: {}", self.secondary_channel);

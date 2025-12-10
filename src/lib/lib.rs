@@ -285,46 +285,6 @@ struct IpInfo {
     pub gateway_address: Ipv4Address,
 }
 
-// Embassy Tasks
-#[embassy_executor::task]
-async fn sequence_sync_task(mut sniffer: Sniffer) {
-    // Get access to start collection watch
-    let mut start_collection_watch = match START_COLLECTION.receiver() {
-        Some(r) => r,
-        None => panic!("Maximum number of recievers reached"),
-    };
-    loop {
-        // Wait for Start Signal
-        while !start_collection_watch.changed().await {
-            // If Start Collection is false, keep waiting
-            Timer::after(Duration::from_millis(100)).await;
-        }
-        sniffer.set_promiscuous_mode(true).unwrap();
-        sniffer.set_receive_cb(|packet| {
-            let gtwy_addr = GATEWAY_ADDRESS.lock(|lock| *lock.borrow());
-            let _ = match_frames! {
-                packet.data,
-                data = DataFrame => {
-                    if let Some(payload) = &data.payload {
-                        // Extract sequence number & save to global context
-                        let (seq_num, src_ip) = match extract_icmp_info(payload){
-                            Some(p) => p,
-                            None => return,
-                        };
-                        // if source IP is equal to the gateway Ip then process the CSI.
-                        if src_ip == gtwy_addr{
-                            // println!("Gateway Address: {:?}", gtwy_addr);
-                            capture_csi_info_promiscous(packet, seq_num);
-                        }
-                    }
-                }
-            };
-        });
-        // Stop Signal
-        start_collection_watch.changed().await;
-    }
-}
-
 #[embassy_executor::task(pool_size = 2)]
 pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     // println!("Network Task Running");
@@ -494,140 +454,6 @@ pub async fn get_sntp_time(stack: Stack<'_>) -> Result<(u32, u64)> {
     Ok((unix_seconds, milliseconds))
 }
 
-// Extracts Sequence No, source IP
-fn extract_icmp_info(payload: &[u8]) -> Option<(u16, Ipv4Address)> {
-    // Possible offsets
-    let offsets = [
-        (0, "Direct IP"),
-        (2, "QoS header"),
-        (8, "LLC/SNAP header"),
-        (10, "QoS + LLC/SNAP header"),
-        (16, "QoS + padding + LLC/SNAP"),
-    ];
-
-    for &(offset, _desc) in offsets.iter() {
-        // Check for IP header (minimum 20 bytes)
-        if payload.len() < offset + 20 {
-            continue;
-        }
-
-        let ip_header = &payload[offset..offset + 20];
-
-        // Verify IPv4 (version = 4)
-        if ip_header[0] >> 4 != 4 {
-            continue;
-        }
-
-        // Extract IP header length (IHL in 4-byte words)
-        let ip_header_len = (ip_header[0] & 0x0F) as usize * 4;
-        if ip_header_len < 20 {
-            continue;
-        }
-
-        // Check for ICMP header (8 bytes)
-        if payload.len() < offset + ip_header_len + 8 {
-            continue;
-        }
-
-        // Verify ICMP protocol (byte 9 in IP header = 0x01)
-        if ip_header[9] != 0x01 {
-            continue;
-        }
-
-        let icmp_header = &payload[offset + ip_header_len..offset + ip_header_len + 8];
-
-        // Verify ICMP Echo Request (8) or Reply (0)
-        if icmp_header[0] != 0 && icmp_header[0] != 8 {
-            continue;
-        }
-
-        // Extract sequence number (bytes 6-7, big endian)
-        let sequence_no = u16::from_be_bytes([icmp_header[6], icmp_header[7]]);
-
-        // Extract source IP (bytes 12-15)
-        let src_ip = Ipv4Address::new(ip_header[12], ip_header[13], ip_header[14], ip_header[15]);
-
-        return Some((sequence_no, src_ip));
-    }
-    None
-}
-
-// Function to capture CSI info from callback and publish to channel
-fn capture_csi_info_promiscous(info: PromiscuousPkt, seq_no: u16) {
-    let mut sta_mac_address = [0_u8; 6];
-    sta_mac(&mut sta_mac_address);
-
-    let rssi = if info.rx_cntl.rssi > 127 {
-        info.rx_cntl.rssi - 256
-    } else {
-        info.rx_cntl.rssi
-    };
-
-    let mut csi_data = Vec::<i8, 612>::new();
-    csi_data.extend(info.data.iter().map(|&b| b as i8));
-
-    #[cfg(not(feature = "esp32c6"))]
-    let csi_packet = CSIDataPacket {
-        sequence_number: seq_no,
-        data_format: RxCSIFmt::Undefined,
-        date_time: None,
-        mac: sta_mac_address,
-        rssi,
-        bandwidth: info.rx_cntl.cwb,
-        antenna: info.rx_cntl.ant,
-        rate: info.rx_cntl.rate,
-        sig_mode: info.rx_cntl.sig_mode,
-        mcs: info.rx_cntl.mcs,
-        smoothing: info.rx_cntl.smoothing,
-        not_sounding: info.rx_cntl.not_sounding,
-        aggregation: info.rx_cntl.aggregation,
-        stbc: info.rx_cntl.stbc,
-        fec_coding: info.rx_cntl.fec_coding,
-        sgi: info.rx_cntl.sgi,
-        noise_floor: info.rx_cntl.noise_floor,
-        ampdu_cnt: info.rx_cntl.ampdu_cnt,
-        channel: info.rx_cntl.channel,
-        secondary_channel: info.rx_cntl.secondary_channel,
-        timestamp: info.rx_cntl.timestamp,
-        rx_state: info.rx_cntl.rx_state,
-        sig_len: info.rx_cntl.sig_len,
-        csi_data_len: info.len as u16,
-        csi_data: csi_data,
-    };
-
-    #[cfg(feature = "esp32c6")]
-    let csi_packet = CSIDataPacket {
-        mac: sta_mac_address,
-        rssi,
-        data_format: RxCSIFmt::Undefined,
-        timestamp: info.rx_cntl.second,
-        rate: info.rx_cntl.rate,
-        noise_floor: info.rx_cntl.noise_floor,
-        sig_len: info.rx_cntl.sig_len,
-        rx_state: info.rx_cntl.rx_state,
-        dump_len: info.rx_cntl.dump_len,
-        he_sigb_len: info.rx_cntl.he_sigb_len,
-        cur_single_mpdu: info.rx_cntl.cur_single_mpdu,
-        cur_bb_format: info.rx_cntl.cur_bb_format,
-        rx_channel_estimate_info_vld: info.rx_cntl.rx_channel_estimate_info_vld,
-        rx_channel_estimate_len: info.rx_cntl.rx_channel_estimate_len,
-        second: info.rx_cntl.second,
-        channel: info.rx_cntl.channel,
-        is_group: info.rx_cntl.is_group,
-        rxend_state: info.rx_cntl.rxend_state,
-        rxmatch3: info.rx_cntl.rxmatch3,
-        rxmatch2: info.rx_cntl.rxmatch2,
-        rxmatch1: info.rx_cntl.rxmatch1,
-        rxmatch0: info.rx_cntl.rxmatch0,
-        date_time: None,
-        sequence_number: seq_no,
-        csi_data_len: info.len as u16,
-        csi_data: csi_data,
-    };
-
-    CSI_PACKET.publish_immediate(csi_packet);
-}
-
 // Function to capture CSI info from callback and publish to channel
 fn capture_csi_info(info: esp_wifi::wifi::wifi_csi_info_t) {
     let rssi = if info.rx_ctrl.rssi() > 127 {
@@ -648,7 +474,7 @@ fn capture_csi_info(info: esp_wifi::wifi::wifi_csi_info_t) {
 
     #[cfg(not(feature = "esp32c6"))]
     let csi_packet = CSIDataPacket {
-        sequence_number: 0,
+        sequence_number: info.rx_seq,
         data_format: RxCSIFmt::Undefined,
         date_time: None,
         mac: [
@@ -881,6 +707,7 @@ async fn stop_collection() {
 async fn recapture_controller() -> WifiController<'static> {
     CONTROLLER_CH.receive().await
 }
+
 /// Starts CSI Collection
 async fn start_collection(conn_type: ConnectionType, config: Configuration) {
     // In case controller isnt started already, configure connection and start again
@@ -1068,7 +895,7 @@ async fn reconstruct_csi_from_udp() -> Result<CSIDataPacket> {
         rx_state: 0,
         sig_len: 0,
         date_time: None,
-        sequence_number,
+        sequence_number: sequence_number,
         data_format,
         csi_data_len: csi_len,
         csi_data,

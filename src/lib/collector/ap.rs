@@ -61,8 +61,6 @@ pub struct ApTriggerConfig {
     pub local_port: u16,
     /// Trigger Type - Broadcast or Unicast
     pub trigger_type: TriggerType,
-    /// Trigger Sequence Number Start
-    pub trigger_seq_num: u16,
 }
 
 impl Default for ApTriggerConfig {
@@ -71,7 +69,6 @@ impl Default for ApTriggerConfig {
             trigger_freq_hz: 1,
             local_port: 10789,
             trigger_type: TriggerType::Broadcast,
-            trigger_seq_num: 0,
         }
     }
 }
@@ -336,7 +333,8 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
         let mut icmp_buffer = [0u8; 12];
 
         // Get Sequence Number
-        let mut seq_num = config.trigger_seq_num;
+        // let mut seq_num = config.trigger_seq_num;
+        let mut seq_num: u16 = 0;
 
         // Start sending trigger packets
         loop {
@@ -353,7 +351,7 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
                     // Create an ICMPv4 Echo Request
                     let icmp_repr = Icmpv4Repr::EchoRequest {
                         ident: 0x22b,
-                        seq_no: seq_num,
+                        seq_no: seq_num.wrapping_add(1),
                         data: &[0xDE, 0xAD, 0xBE, 0xEF],
                     };
 
@@ -405,7 +403,7 @@ pub async fn ap_icmp_trigger(stack: Stack<'static>, config: ApTriggerConfig) {
                     raw_socket.send(ipv4_packet_buffer).await;
 
                     // Increment sequence number for next packet
-                    seq_num = seq_num.wrapping_add(1);
+                    // seq_num = seq_num.wrapping_add(1);
 
                     // Wait for user specified duration
                     Timer::after(trigger_interval).await;

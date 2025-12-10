@@ -23,17 +23,18 @@ use esp_println::println;
 use esp_wifi::wifi::WifiController;
 use esp_wifi::wifi::{ClientConfiguration, Configuration, Interfaces, WifiDevice, WifiEvent};
 
+use crate::collector::sniffer;
 use crate::error::Result;
 use crate::run_dhcp_client;
 
 use heapless::Vec;
 
+use crate::CSIConfig;
 use crate::{
     build_csi_config, capture_csi_info, configure_connection, connect_wifi, net_task,
     process_csi_packet, recapture_controller, run_ntp_sync, start_collection, start_wifi,
     stop_collection, ConnectionType,
 };
-use crate::{sequence_sync_task, CSIConfig};
 
 use crate::{
     CSIDataPacket, CONTROLLER_CH, CONTROLLER_HALTED_SIGNAL, CSI_CONFIG_CH, DHCP_CLIENT_INFO,
@@ -207,9 +208,8 @@ impl CSIStation {
         // If in Monitor Mode, sniffer promiscuous mode is required to cross reference triggering ICMP or Beacon packets sequence number with extracted CSI
         match self.op_mode {
             StaOperationMode::Monitor(_config) => {
-                SEQ_NUM_EN.store(true, core::sync::atomic::Ordering::Relaxed);
-                // Spawn sequence number sync task
-                spawner.spawn(sequence_sync_task(interface.sniffer)).ok();
+                let sniffer = interface.sniffer;
+                sniffer.set_promiscuous_mode(true).unwrap();
             }
             _ => {}
         }
@@ -254,11 +254,6 @@ impl CSIStation {
         self.op_mode = op_mode;
     }
 
-    // Updates MAC Address Filter
-    // pub async fn update_mac_filter(&mut self, mac_filter: Option<[u8; 6]>) {
-    //     self.mac_filter = mac_filter;
-    // }
-
     /// Retrieve the latest available CSI data packet
     pub async fn get_csi_data(&mut self) -> Result<CSIDataPacket> {
         // Wait for CSI data packet to update
@@ -299,27 +294,18 @@ pub async fn sta_connection(op_mode: StaOperationMode) {
         // Acquire the controller
         let mut controller = controller_rx.receive().await;
 
-        // Trigger Logic
-        match op_mode {
-            StaOperationMode::Trigger(_) => {
-                // Retrieved Updated Configuration)
-                let csi_config = CSI_CONFIG_CH.receive().await;
-                // Build CSI Configuration
-                let csi_cfg = build_csi_config(csi_config.clone());
-                println!("Starting CSI Collection");
-                controller
-                    .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                        capture_csi_info(info);
-                    })
-                    .unwrap();
-            }
-            _ => {
-                // Monitor mode is handled by sequence_sync_task,
-                // Nothing needed here.
-            }
-        }
+        // Retrieved Updated Configuration)
+        let csi_config = CSI_CONFIG_CH.receive().await;
+        // Build CSI Configuration
+        let csi_cfg = build_csi_config(csi_config.clone());
+        println!("Starting CSI Collection");
+        controller
+            .set_csi(csi_cfg, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                capture_csi_info(info);
+            })
+            .unwrap();
 
-        // Monitoring/stop loop
+        // Monitoring/Stop loop
         loop {
             // Events Future
             let wait_event_fut = controller.wait_for_events(sta_events, true);
@@ -365,23 +351,24 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
         None => panic!("Maximum number of recievers reached"),
     };
 
+    // ------------------ ICMP Socket Setup ------------------
+    let mut rx_buffer = [0; 64];
+    let mut tx_buffer = [0; 64];
+    let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
+    let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
+
+    let raw_socket = RawSocket::new::<WifiDevice<'_>>(
+        sta_stack,
+        IpVersion::Ipv4,
+        IpProtocol::Icmp,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+
     match sta_config {
         StaOperationMode::Trigger(trigger_config) => {
-            // ------------------ ICMP Socket Setup ------------------
-            let mut rx_buffer = [0; 64];
-            let mut tx_buffer = [0; 64];
-            let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
-            let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
-
-            let raw_socket = RawSocket::new::<WifiDevice<'_>>(
-                sta_stack,
-                IpVersion::Ipv4,
-                IpProtocol::Icmp,
-                &mut rx_meta,
-                &mut rx_buffer,
-                &mut tx_meta,
-                &mut tx_buffer,
-            );
             // Buffer to hold ICMP Packet
             let mut icmp_buffer = [0u8; 12];
 
@@ -423,7 +410,6 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
 
             // IP Packet buffer that will be sent or recieved
             let ipv4_packet_buffer = ipv4_packet.into_inner();
-
             loop {
                 // Wait for start signal
                 while !start_collection_watch.changed().await {
@@ -469,7 +455,6 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
                 &mut udp_tx_meta,
                 &mut udp_tx_buffer,
             );
-
             println!("Binding");
             // Bind to specified source port
             socket.bind(monitor_config.local_port).unwrap();
@@ -493,6 +478,7 @@ pub async fn sta_network_ops(sta_stack: Stack<'static>, sta_config: StaOperation
             // Width of message (625) = 2 bytes for seq_no + 1 byte for format + 4 bytes for timestamp + 6 bytes for MAC + 612 bytes for CSI data
             let mut message_u8: Vec<u8, 625> = Vec::new();
             // let seq_num_en = SEQ_NUM_EN.load(core::sync::atomic::Ordering::SeqCst);
+
             loop {
                 // Wait for start signal
                 while !start_collection_watch.changed().await {
